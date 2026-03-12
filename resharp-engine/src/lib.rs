@@ -273,7 +273,9 @@ impl Regex {
         let mut matches = Vec::new();
         let mut search_start = 0;
 
-        if self.fixed_length.is_some() && fwd_prefix.find_all_literal(input, &mut matches) {
+        if self.fixed_length == Some(fwd_prefix.len() as u32)
+            && fwd_prefix.find_all_literal(input, &mut matches)
+        {
             // done
         } else if let Some(fl) = self.fixed_length {
             while let Some(candidate) = fwd_prefix.find_fwd(input, search_start) {

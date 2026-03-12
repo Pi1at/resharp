@@ -84,7 +84,11 @@ pub fn has_simd() -> bool {
     {
         std::arch::is_x86_feature_detected!("avx2")
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    {
+        true
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         false
     }
@@ -94,6 +98,11 @@ pub fn has_simd() -> bool {
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+
+#[cfg(target_arch = "aarch64")]
+mod neon;
+#[cfg(target_arch = "aarch64")]
+pub use neon::*;
 
 #[cfg(target_arch = "x86_64")]
 pub struct RevSearchBytes {
@@ -676,9 +685,9 @@ pub struct FwdPrefixSearch {
     sets: Vec<TSet>,
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[repr(align(32))]
-struct TeddyMasks {
+pub(crate) struct TeddyMasks {
     lo: [[u8; 32]; 3],
     hi: [[u8; 32]; 3],
 }
@@ -958,14 +967,14 @@ impl FwdPrefixSearch {
     }
 }
 
-// ---- non-x86_64 stubs (never constructed, only needed for type-checking) ----
+// ---- stubs (never constructed, only needed for type-checking) ----
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub struct RevSearchBytes {
     _private: (),
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 impl RevSearchBytes {
     pub fn bytes(&self) -> &[u8] {
         unreachable!()
@@ -976,12 +985,12 @@ impl RevSearchBytes {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub struct FwdLiteralSearch {
     _private: (),
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 impl FwdLiteralSearch {
     pub fn len(&self) -> usize {
         unreachable!()
@@ -996,12 +1005,12 @@ impl FwdLiteralSearch {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub struct RevPrefixSearch {
     _private: (),
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 impl RevPrefixSearch {
     pub fn len(&self) -> usize {
         unreachable!()
@@ -1012,12 +1021,12 @@ impl RevPrefixSearch {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub struct FwdPrefixSearch {
     _private: (),
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 impl FwdPrefixSearch {
     pub fn len(&self) -> usize {
         unreachable!()

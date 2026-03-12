@@ -42,19 +42,16 @@ You combine all of these with `&` to get more complex patterns. RE# also support
 
 NOTE: RE# is not compatible with some `regex` crate features, eg. lazy quantifiers (`.*?`). See the full [syntax reference](docs/syntax.md) for details.
 
-### Differences from `resharp-dotnet` RE# and rust `regex`
+### Differences from [`resharp-dotnet`](https://github.com/ieviev/resharp-dotnet) and rust `regex`
 
-Rust `resharp` is written from scratch, there are a number of differences from the original. For starters this works on byte slices (`&[u8]`) and UTF-8 rather than UTF-16. The parser uses the `regex-syntax` crate as a base with 3 extensions described above. The API is also different, there's a different internal representation for the characters and algebra.. etc
+Written from scratch in rust - operates on `&[u8]` / UTF-8 rather than UTF-16, uses `regex-syntax` as a parser base. When to use this over the `regex` crate:
 
-This version now uses AVX2 SIMD for literal search, prefix matching, and byte skipping in the match loop, though the optimizations aren't as advanced as the dotnet version yet.
+- intersection, complement, or lookarounds
+- large alternatives with high performance (at the expense of memory)
+- leftmost longest matches rather than leftmost first
+- `find_anchored` and `find_all` (no `find` or `captures`)
 
-When you should use this as opposed to the default regex in rust is:
-- you want to match patterns that require intersection or complement or lookarounds
-- you want to match large regexes with high performance, at the expense of memory usage
-- you want leftmost longest matches rather than leftmost first matches
-- you want to extract all matches rather than just the first match, RE# only supports `find_anchored` and `find_all` but not `find` or `captures`
-
-For tuning, `EngineOptions` controls precompilation threshold, capacity, and lookahead context:
+Matching returns `Result<Vec<Match>, Error>` - capacity or lookahead overflow will fail outright rather than silently degrade. `EngineOptions` controls precompilation threshold, capacity, and lookahead context:
 
 ```rust
 let opts = resharp::EngineOptions {
@@ -65,12 +62,11 @@ let opts = resharp::EngineOptions {
 let re = resharp::Regex::with_options(r"pattern", opts).unwrap();
 ```
 
-`RE#` matching API is slightly different from `regex`, 
-matches will return a `Result<Vec<Match>, Error>`, where the `Error` can be a capacity overflow or a lookahead context overflow. `RE#` will either give you fast matching or fail outright. You can catch these errors and rebuild / adjust your pattern or options accordingly.
-
 ## Benchmarks
 
-Throughput comparison with `regex` and `fancy-regex` on an AMD Ryzen 7 5800X, compiled with `--release`. Compile time is excluded; only matching is measured. Run with `cargo bench -- 'readme/' --list`.
+Throughput comparison with `regex` and `fancy-regex`, compiled with `--release`. Compile time is excluded; only matching is measured. Uses SIMD intrinsics (AVX2, NEON) with possibly more backends in the near future. Run with `cargo bench -- 'readme/' --list`.
+
+### AMD Ryzen 7 5800X (105W TDP)
 
 | Benchmark | resharp | regex | fancy-regex |
 |---|---|---|---|
@@ -81,13 +77,24 @@ Throughput comparison with `regex` and `fancy-regex` on an AMD Ryzen 7 5800X, co
 | literal alternation (900KB) | **12.1 GiB/s** | 11.4 GiB/s | 10.2 GiB/s |
 | literal `"Sherlock Holmes"` (900KB) | 33.9 GiB/s | 38.7 GiB/s | 33.7 GiB/s |
 
+### Rockchip RK3588 ARM (5-10W TDP)
+
+| Benchmark | resharp | regex | fancy-regex |
+|---|---|---|---|
+| dictionary 2663 words (900KB, ~15 matches) | 287 MiB/s | 313 MiB/s | 312 MiB/s |
+| dictionary seeded (944KB, ~2678 matches) | **229 MiB/s** | 25 MiB/s | 8 MiB/s |
+| dictionary `(?i)` 2663 words (900KB) | **288 MiB/s** | 0.01 MiB/s | 0.01 MiB/s |
+| lookaround `(?<=\s)[A-Z][a-z]+(?=\s)` (900KB) | **204 MiB/s** | -- | 9 MiB/s |
+| literal alternation (900KB) | 1.70 GiB/s | 1.99 GiB/s | 1.94 GiB/s |
+| literal `"Sherlock Holmes"` (900KB) | 6.44 GiB/s | 7.11 GiB/s | 6.85 GiB/s |
+
 **Notes on the results:**
 
 - The first dictionary row is roughly tied - the prose haystack only contains ~15 matches, so the lazy DFA barely explores any states. RE#'s advantage is that its full DFA is smaller, but this isn't visible when most states are never materialized.
-- On longer inputs or denser matches, the other engines will degrade - take lazy-dfa benchmarks with a grain of salt, you will not be matching the exact same string over and over in the real world. The seeded dictionary row confirms this: with ~2678 matches, RE# holds at 449 MiB/s vs 58 MiB/s for `regex`.
-- The `(?i)` row shows what happens when the pattern forces `regex` to fall back from its DFA to an NFA: throughput drops from 552 MiB/s to 0.03 MiB/s. RE# handles case folding in the DFA and maintains full speed. You can increase `regex`'s DFA threshold to avoid this fallback, but only up to a point.
+- On longer inputs or denser matches, the other engines will degrade - take lazy-dfa benchmarks with a grain of salt, you will not be matching the exact same string over and over in the real world. The seeded dictionary row confirms this: with ~2678 matches, RE# holds at 449 MiB/s vs 58 MiB/s for `regex` on x86, and 229 MiB/s vs 25 MiB/s on ARM.
+- The `(?i)` row shows what happens when the pattern forces `regex` to fall back from its DFA to an NFA: throughput drops to 0.03 MiB/s (x86) / 0.01 MiB/s (ARM). RE# handles case folding in the DFA and maintains full speed. You can increase `regex`'s DFA threshold to avoid this fallback, but only up to a point.
 - RE# compiles lookarounds directly into the automaton - no back-and-forth between forward and backward passes. `regex` doesn't support lookarounds except for anchors; `fancy-regex` handles them via backtracking, which is occasionally much slower.
-- Literal and alternation performance relies on explicit AVX2 SIMD - no ARM NEON or other backends yet, so expect slower results on non-x86 platforms.
+- The same patterns that win on x86 also win on ARM - the full DFA approach scales down well.
 - If you encounter a bug or a pattern where RE# is >5x slower than `regex` or `fancy-regex`, please [open an issue](https://github.com/ieviev/resharp/issues) - it would help improve the library. Note that `regex` returns leftmost-first matches while RE# returns leftmost-longest, so match results may differ. The performance profile also differs - RE# works right to left while `regex` works left to right.
 
 ## Crate structure

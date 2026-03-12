@@ -16,12 +16,12 @@ readme = "../README.md"
 debug-nulls = []
 
 [dependencies]
-resharp-algebra = { version = "0.2.1", path = "../resharp-algebra" }
-resharp-parser = { version = "0.2.1", path = "../resharp-parser" }
+resharp-algebra = { version = "0.3.0", path = "../resharp-algebra" }
+resharp-parser = { version = "0.3.0", path = "../resharp-parser" }
 
 [dev-dependencies]
-resharp-algebra = { version = "0.2.1", path = "../resharp-algebra" }
-resharp-parser = { version = "0.2.1", path = "../resharp-parser" }
+resharp-algebra = { version = "0.3.0", path = "../resharp-algebra" }
+resharp-parser = { version = "0.3.0", path = "../resharp-parser" }
 toml = "0.8"
 criterion = "0.5"
 regex = "1"

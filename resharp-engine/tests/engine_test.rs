@@ -663,3 +663,33 @@ fn collect_rev_lookahead_scaling_stress() {
         n100,
     );
 }
+
+#[test]
+fn literal_20_bytes() {
+    let pattern = "ABCDEFGHIJKLMNOPQRST";
+    let mut hay = vec![b'.'; 200];
+    hay[100..120].copy_from_slice(pattern.as_bytes());
+    let re = Regex::new(pattern).unwrap();
+    let r: Vec<_> = re.find_all(&hay).unwrap().iter().map(|m| (m.start, m.end)).collect();
+    assert_eq!(r, vec![(100, 120)]);
+}
+
+#[test]
+fn literal_16_bytes() {
+    let pattern = "ABCDEFGHIJKLMNOP";
+    let mut hay = vec![b'.'; 100];
+    hay[50..66].copy_from_slice(pattern.as_bytes());
+    let re = Regex::new(pattern).unwrap();
+    let r: Vec<_> = re.find_all(&hay).unwrap().iter().map(|m| (m.start, m.end)).collect();
+    assert_eq!(r, vec![(50, 66)]);
+}
+
+#[test]
+fn literal_17_bytes() {
+    let pattern = "ABCDEFGHIJKLMNOPQ";
+    let mut hay = vec![b'.'; 100];
+    hay[40..57].copy_from_slice(pattern.as_bytes());
+    let re = Regex::new(pattern).unwrap();
+    let r: Vec<_> = re.find_all(&hay).unwrap().iter().map(|m| (m.start, m.end)).collect();
+    assert_eq!(r, vec![(40, 57)]);
+}
