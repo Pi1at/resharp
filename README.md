@@ -11,7 +11,7 @@ RE# compiles patterns into deterministic automata. All matching is non-backtrack
 
 ## Install
 
-```
+```sh
 cargo add resharp
 ```
 
@@ -28,7 +28,7 @@ let found = re.is_match(b"the cat and the dog");
 
 RE# supports standard regex syntax plus three extensions: `_` (universal wildcard), `&` (intersection), and `~(...)` (complement). `_` matches any character including newlines, so `_*` means "any string".
 
-```
+```perl
 _*              any string
 a_*             any string that starts with 'a'
 _*a             any string that ends with 'a'
@@ -38,7 +38,7 @@ _*a_*           any string that contains 'a'
 (?<=b)_*&_*(?=a)  preceded by 'b' AND followed by 'a'
 ```
 
-You combine all of these with `&` to get more complex patterns. RE# also supports lookarounds (`(?=...)`, `(?<=...)`, `(?!...)`, `(?<!...)`), compiled directly into the automaton with no backtracking. 
+You combine all of these with `&` to get more complex patterns. RE# also supports lookarounds (`(?=...)`, `(?<=...)`, `(?!...)`, `(?<!...)`), compiled directly into the automaton with no backtracking.
 
 > RE# is not compatible with some `regex` crate features, eg. lazy quantifiers (`.*?`). See the full [syntax reference](docs/syntax.md) for details.
 
@@ -82,11 +82,13 @@ Throughput comparison with `regex` and `fancy-regex`, compiled with `--release`.
 | Benchmark | resharp | regex | fancy-regex |
 |---|---|---|---|
 | dictionary 2663 words (900KB, ~15 matches) | 287 MiB/s | 313 MiB/s | 312 MiB/s |
-| dictionary seeded (944KB, ~2678 matches) | **229 MiB/s** | 25 MiB/s | 8 MiB/s |
+| dictionary 2663 words (944KB, ~2678 matches) | **229 MiB/s** | 25 MiB/s | 8 MiB/s |
 | dictionary `(?i)` 2663 words (900KB) | **288 MiB/s** | 0.01 MiB/s | 0.01 MiB/s |
 | lookaround `(?<=\s)[A-Z][a-z]+(?=\s)` (900KB) | **204 MiB/s** | -- | 9 MiB/s |
 | literal alternation (900KB) | 1.70 GiB/s | 1.99 GiB/s | 1.94 GiB/s |
 | literal `"Sherlock Holmes"` (900KB) | 6.44 GiB/s | 7.11 GiB/s | 6.85 GiB/s |
+
+<sub>(added just because i find it pretty shocking and cool)</sub>
 
 **Notes on the results:**
 
