@@ -13,9 +13,6 @@ documentation = "https://docs.rs/resharp"
 readme = "../README.md"
 
 [features]
-default = ["delayed"]
-delayed = ["resharp-algebra/delayed"]
-debug-derivatives = []
 debug-nulls = []
 
 [dependencies]

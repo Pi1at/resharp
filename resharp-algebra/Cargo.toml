@@ -15,8 +15,5 @@ readme = "../README.md"
 smallvec = "1.14.0"
 
 [features]
-print_rewrites = []
 graphviz = []
-delayed = []
 norewrite = []
-default = ["delayed"]
