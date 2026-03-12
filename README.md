@@ -88,7 +88,7 @@ Throughput comparison with `regex` and `fancy-regex`, compiled with `--release`.
 | literal alternation (900KB) | 1.70 GiB/s | 1.99 GiB/s | 1.94 GiB/s |
 | literal `"Sherlock Holmes"` (900KB) | 6.44 GiB/s | 7.11 GiB/s | 6.85 GiB/s |
 
-<sub>(added just because i find it pretty shocking and cool)</sub>
+<sub>(added because i find it pretty shocking - this is a tiny board smaller than a phone)</sub>
 
 **Notes on the results:**
 
