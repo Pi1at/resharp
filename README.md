@@ -42,9 +42,9 @@ You combine all of these with `&` to get more complex patterns. RE# also support
 
 > RE# is not compatible with some `regex` crate features, eg. lazy quantifiers (`.*?`). See the full [syntax reference](docs/syntax.md) for details.
 
-### Differences from [`resharp-dotnet`](https://github.com/ieviev/resharp-dotnet) and rust [`regex`](https://crates.io/crates/regex)
+### When to use RE# over [`regex`](https://crates.io/crates/regex)
 
-Written from scratch in rust - operates on `&[u8]` / UTF-8 rather than UTF-16, uses `regex-syntax` as a parser base. RE# aims to match `regex` crate performance on standard patterns, with some trade-offs on either side. When to use this over `regex`:
+This is a from-scratch rust implementation operating on `&[u8]` / UTF-8 (the [dotnet version](https://github.com/ieviev/resharp-dotnet) uses UTF-16), with `regex-syntax` as a parser base. RE# aims to match `regex` crate performance on standard patterns, with trade-offs on either side. Reasons to reach for RE#:
 
 - intersection, complement, or lookarounds
 - large alternatives with high performance (at the expense of memory)
