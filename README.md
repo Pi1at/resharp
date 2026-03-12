@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/resharp.svg)](https://crates.io/crates/resharp)
 [![docs.rs](https://docs.rs/resharp/badge.svg)](https://docs.rs/resharp)
 
-A high-performance, automata-based regex engine with first-class support for **intersection** and **complement** operations.
+A high-performance, automata-based regex engine with first-class support for **intersection** and **complement** operations. RE#'s main strength is complex patterns - large lists of alternatives, lookarounds, and boolean combinations - where traditional engines degrade or fall back to slower paths.
 
 RE# compiles patterns into deterministic automata. All matching is non-backtracking with guaranteed linear-time execution. RE# extends standard regex syntax with intersection (`&`), complement (`~`), and a universal wildcard (`_`), enabling patterns that are impossible or impractical to express with standard regex.
 
