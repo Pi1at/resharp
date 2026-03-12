@@ -44,7 +44,7 @@ NOTE: RE# is not compatible with some `regex` crate features, eg. lazy quantifie
 
 ### Differences from [`resharp-dotnet`](https://github.com/ieviev/resharp-dotnet) and rust [`regex`](https://crates.io/crates/regex)
 
-Written from scratch in rust - operates on `&[u8]` / UTF-8 rather than UTF-16, uses `regex-syntax` as a parser base. When to use this over the `regex` crate:
+Written from scratch in rust - operates on `&[u8]` / UTF-8 rather than UTF-16, uses `regex-syntax` as a parser base. RE# aims to match `regex` crate performance on standard patterns, with some trade-offs on either side. When to use this over `regex`:
 
 - intersection, complement, or lookarounds
 - large alternatives with high performance (at the expense of memory)
