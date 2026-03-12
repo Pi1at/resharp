@@ -253,3 +253,29 @@ name = "alt_common_prefix_branch"
 pattern = "(abc|abd)"
 input = "abd"
 matches = [[0, 3]]
+
+# -- no trailing newline --
+
+[[test]]
+name = "no_trailing_newline_union"
+pattern = '(_*foo_*)|(_*bar_*)'
+input = "foo\nbar"
+matches = [[0, 7]]
+
+[[test]]
+name = "no_trailing_newline_last_line"
+pattern = "bar"
+input = "foo\nbar"
+matches = [[4, 7]]
+
+[[test]]
+name = "no_trailing_newline_dot_plus"
+pattern = ".+"
+input = "foo\nbar"
+matches = [[0, 3], [4, 7]]
+
+[[test]]
+name = "trailing_newline_dot_plus"
+pattern = ".+"
+input = "foo\nbar\n"
+matches = [[0, 3], [4, 7]]

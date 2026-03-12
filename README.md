@@ -88,7 +88,7 @@ Throughput comparison with `regex` and `fancy-regex` on an AMD Ryzen 7 5800X, co
 - The `(?i)` row shows what happens when the pattern forces `regex` to fall back from its DFA to an NFA: throughput drops from 552 MiB/s to 0.03 MiB/s. RE# handles case folding in the DFA and maintains full speed. You can increase `regex`'s DFA threshold to avoid this fallback, but only up to a point.
 - RE# compiles lookarounds directly into the automaton - no back-and-forth between forward and backward passes. `regex` doesn't support lookarounds except for anchors; `fancy-regex` handles them via backtracking, which is occasionally much slower.
 - Literal and alternation performance relies on explicit AVX2 SIMD - no ARM NEON or other backends yet, so expect slower results on non-x86 platforms.
-- If you encounter a bug or a pattern where RE# is >5x slower than `regex` or `fancy-regex`, please [open an issue](https://github.com/ieviev/resharp/issues) - that's worth looking into.
+- If you encounter a bug or a pattern where RE# is >5x slower than `regex` or `fancy-regex`, please [open an issue](https://github.com/ieviev/resharp/issues) - it would help improve the library. Note that `regex` returns leftmost-first matches while RE# returns leftmost-longest, so match results may differ. The performance profile also differs - RE# works right to left while `regex` works left to right.
 
 ## Crate structure
 
