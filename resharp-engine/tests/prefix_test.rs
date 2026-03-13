@@ -191,10 +191,8 @@ fn collect_rev_intersection_abc() {
         b.get_nulls_id(current)
     );
 
-    // BUG: collect_rev_prefix uses prefix_skip which picks one representative
-    // minterm per BFS prefix set. For intersections, different bytes in [a-c]
-    // lead to different DFA states (tracking which of a,b,c seen), so the
-    // single prefix_transition is wrong.
+    // prefix_transition is computed but unused; collect_rev_prefix walks
+    // each byte individually through center_table, so intersections work.
     let re = resharp::Regex::new(pattern).unwrap();
     let nulls = re.collect_rev_nulls_debug(input);
     eprintln!("collect_rev nulls: {:?}", nulls);

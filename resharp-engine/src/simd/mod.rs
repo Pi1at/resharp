@@ -328,6 +328,10 @@ impl FwdLiteralSearch {
         self.needle.len()
     }
 
+    pub fn rare_byte(&self) -> u8 {
+        self.rare_byte
+    }
+
     pub fn new(needle: &[u8]) -> Self {
         debug_assert!(!needle.is_empty());
         let mut rare_idx = 0;
@@ -1293,6 +1297,10 @@ pub struct FwdLiteralSearch {
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 impl FwdLiteralSearch {
     pub fn len(&self) -> usize {
+        unreachable!()
+    }
+
+    pub fn rare_byte(&self) -> u8 {
         unreachable!()
     }
 

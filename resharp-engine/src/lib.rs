@@ -12,6 +12,8 @@ pub use engine::calc_potential_start;
 #[doc(hidden)]
 pub use engine::calc_prefix_sets;
 #[doc(hidden)]
+pub use engine::BDFA;
+#[doc(hidden)]
 pub use resharp_algebra::solver::TSetId;
 
 pub use resharp_algebra::nulls::Nullability;
@@ -96,9 +98,10 @@ pub struct Match {
 
 struct RegexInner {
     b: RegexBuilder,
-    fwd: engine::LazyDFA,
-    rev: engine::LazyDFA,
+    fwd: engine::LDFA,
+    rev: engine::LDFA,
     nulls_buf: Vec<usize>,
+    bounded: Option<engine::BDFA>,
 }
 
 /// compiled regex backed by a lazy DFA.
@@ -109,10 +112,57 @@ pub struct Regex {
     fwd_prefix: Option<accel::FwdPrefixSearch>,
     fwd_prefix_stripped: bool,
     fixed_length: Option<u32>,
-    #[allow(dead_code)]
     max_length: Option<u32>,
     empty_nullable: bool,
     fwd_end_nullable: bool,
+}
+
+// tight inner loop with raw pointers - no function calls, no bounds checks.
+// writes matches through raw pointer. returns (state, pos, match_count).
+#[inline(never)]
+fn bdfa_inner<const PREFIX: u8>(
+    table: *const u16,
+    match_rel: *const u32,
+    ml: *const u8,
+    data: *const u8,
+    mt_log: u32,
+    initial: u16,
+    mut state: u16,
+    mut pos: usize,
+    len: usize,
+    match_buf: *mut Match,
+    match_cap: usize,
+) -> (u16, usize, usize) {
+    let mut mc: usize = 0;
+    unsafe {
+        while pos < len {
+            if PREFIX > 0 && state == initial {
+                return (state, pos, mc);
+            }
+            let mt = *ml.add(*data.add(pos) as usize) as usize;
+            let delta = (state as usize) << mt_log | mt;
+            let next = *table.add(delta);
+            if next == 0 {
+                return (state, pos, mc); // cache miss
+            }
+            state = next;
+            let rel = *match_rel.add(state as usize);
+            if rel > 0 {
+                if mc >= match_cap {
+                    return (state, pos, mc); // buffer full
+                }
+                *match_buf.add(mc) = Match {
+                    start: pos - rel as usize,
+                    end: pos,
+                };
+                mc += 1;
+                state = initial;
+                continue;
+            }
+            pos += 1;
+        }
+        (state, pos, mc)
+    }
 }
 
 impl Regex {
@@ -154,8 +204,8 @@ impl Regex {
         let has_look = b.contains_look(node);
 
         let max_cap = opts.max_dfa_capacity.min(u16::MAX as usize);
-        let mut fwd = engine::LazyDFA::new(&mut b, fwd_start, max_cap)?;
-        let mut rev = engine::LazyDFA::new(&mut b, ts_rev_start, max_cap)?;
+        let mut fwd = engine::LDFA::new(&mut b, fwd_start, max_cap)?;
+        let mut rev = engine::LDFA::new(&mut b, ts_rev_start, max_cap)?;
 
         if opts.dfa_threshold > 0 {
             fwd.precompile(&mut b, opts.dfa_threshold);
@@ -164,8 +214,9 @@ impl Regex {
 
         let (fwd_prefix, fwd_prefix_stripped) = if min_len > 0 && !has_look {
             let (fp, stripped) = engine::build_fwd_prefix(&mut b, node)?;
-            if fp.is_some() && !stripped && b.is_infinite(node) {
-                (None, false)
+            if !stripped && b.is_infinite(node) {
+                let strict = engine::build_strict_literal_prefix(&mut b, node)?;
+                (strict, false)
             } else {
                 (fp, stripped)
             }
@@ -179,12 +230,32 @@ impl Regex {
             fwd.compute_fwd_skip(&mut b);
         }
 
+        let use_bounded = max_length.is_some()
+            && fixed_length.is_none()
+            && !has_look
+            && !b.contains_anchors(node) // TBD: handle anchors in BDFA
+            && b.num_nodes() < 1000; // rev+fwd is better for large regexes
+
+        if cfg!(feature = "debug-nulls") {
+            eprintln!(
+                "  [bounded-check] max_length={:?} fixed_length={:?} has_look={} anchors={} fwd_prefix={} -> use={}",
+                max_length, fixed_length, has_look, b.contains_anchors(node), fwd_prefix.is_some(), use_bounded
+            );
+        }
+
+        let bounded = if use_bounded {
+            Some(engine::BDFA::new(&mut b, fwd_start)?)
+        } else {
+            None
+        };
+
         Ok(Regex {
             inner: Mutex::new(RegexInner {
                 b,
                 fwd,
                 rev,
                 nulls_buf: Vec::new(),
+                bounded,
             }),
             fwd_prefix,
             fwd_prefix_stripped,
@@ -195,10 +266,21 @@ impl Regex {
         })
     }
 
+    /// number of algebra nodes created during compilation.
+    pub fn node_count(&self) -> u32 {
+        self.inner.lock().unwrap().b.num_nodes()
+    }
+
     /// (fwd_states, rev_states) count.
     pub fn dfa_stats(&self) -> (usize, usize) {
         let inner = self.inner.lock().unwrap();
         (inner.fwd.state_nodes.len(), inner.rev.state_nodes.len())
+    }
+
+    /// BDFA stats: (states, minterms, prefix_len) if BDFA is active.
+    pub fn bdfa_stats(&self) -> Option<(usize, usize, usize)> {
+        let inner = self.inner.lock().unwrap();
+        inner.bounded.as_ref().map(|b| (b.states.len(), b.num_mt, b.prefix_len))
     }
 
     /// whether forward prefix or reverse skip acceleration is active.
@@ -218,12 +300,41 @@ impl Regex {
                 Ok(vec![])
             };
         }
+        // 1. bounded + fwd prefix → BDFA with prefix skip
+        {
+            let inner = self.inner.lock().unwrap();
+            if let Some(ref bd) = inner.bounded {
+                if bd.prefix.is_some() {
+                    drop(inner);
+                    return self.find_all_fwd_bounded(input);
+                }
+            }
+        }
+        // 2. rare literal fwd prefix → left-right
         if self.fwd_prefix.is_some() {
             if self.fwd_prefix_stripped {
                 return self.find_all_fwd_prefix_stripped(input);
             }
             return self.find_all_fwd_prefix(input);
         }
+        // 3. rev prefix exists → right-left (standard DFA)
+        {
+            let inner = self.inner.lock().unwrap();
+            let has_rev_accel = inner.rev.prefix_skip.is_some() || inner.rev.can_skip();
+            if has_rev_accel {
+                drop(inner);
+                return self.find_all_dfa(input);
+            }
+        }
+        // 4. bounded, no prefixes → BDFA
+        {
+            let inner = self.inner.lock().unwrap();
+            if inner.bounded.is_some() {
+                drop(inner);
+                return self.find_all_fwd_bounded(input);
+            }
+        }
+        // 5. fallback → right-left
         self.find_all_dfa(input)
     }
 
@@ -297,7 +408,7 @@ impl Regex {
         } else {
             inner
                 .fwd
-                .scan_fwd_all(&mut inner.b, &inner.nulls_buf, input, &mut matches)?;
+                .scan_fwd_all(&mut inner.b, &inner.nulls_buf, input, self.max_length, &mut matches)?;
         }
 
         if FWD_NULL
@@ -314,7 +425,7 @@ impl Regex {
     }
 
     fn find_all_nullable_slow(
-        fwd: &mut engine::LazyDFA,
+        fwd: &mut engine::LDFA,
         b: &mut RegexBuilder,
         input: &[u8],
     ) -> Result<Vec<Match>, Error> {
@@ -340,6 +451,117 @@ impl Regex {
         Ok(matches)
     }
 
+    fn find_all_fwd_bounded(&self, input: &[u8]) -> Result<Vec<Match>, Error> {
+        let inner = &mut *self.inner.lock().unwrap();
+        let bounded = inner.bounded.as_mut().unwrap();
+        match bounded.prefix {
+            Some(accel::FwdPrefixSearch::Literal(_)) => {
+                Self::bdfa_scan::<2>(bounded, &mut inner.b, input)
+            }
+            Some(accel::FwdPrefixSearch::Prefix(_)) => {
+                Self::bdfa_scan::<1>(bounded, &mut inner.b, input)
+            }
+            None => Self::bdfa_scan::<0>(bounded, &mut inner.b, input),
+        }
+    }
+
+    // PREFIX: 0=none, 1=potential (teddy), 2=literal (deterministic)
+    fn bdfa_scan<const PREFIX: u8>(
+        bounded: &mut BDFA,
+        b: &mut RegexBuilder,
+        input: &[u8],
+    ) -> Result<Vec<Match>, Error> {
+        let mut matches: Vec<Match> = Vec::new();
+        let initial = bounded.initial;
+        let mt_log = bounded.mt_log;
+        let ml = bounded.minterms_lookup;
+        let data = input.as_ptr();
+        let len = input.len();
+        let mut state = initial;
+        let mut pos: usize = 0;
+
+        'outer: loop {
+            matches.reserve(256);
+            let spare = matches.capacity() - matches.len();
+            let buf_ptr = unsafe { matches.as_mut_ptr().add(matches.len()) };
+            let table = bounded.table.as_ptr();
+            let match_rel = bounded.match_rel.as_ptr();
+            let (s, p, mc) = bdfa_inner::<PREFIX>(
+                table, match_rel, ml.as_ptr(), data, mt_log, initial, state, pos, len,
+                buf_ptr, spare,
+            );
+            state = s;
+            pos = p;
+            unsafe { matches.set_len(matches.len() + mc) };
+            if pos >= len {
+                break;
+            }
+
+            if PREFIX > 0 && state == initial {
+                let found = bounded.prefix.as_ref().unwrap().find_fwd(input, pos);
+                match found {
+                    Some(p) => {
+                        if PREFIX == 2 {
+                            pos = p + bounded.prefix_len;
+                            state = bounded.after_prefix;
+                        } else {
+                            pos = p;
+                            for _ in 0..bounded.prefix_len {
+                                if pos >= len {
+                                    break;
+                                }
+                                let mt = ml[input[pos] as usize] as usize;
+                                state = bounded.transition(b, state, mt)?;
+                                if state == initial {
+                                    break;
+                                }
+                                pos += 1;
+                            }
+                        }
+                        let rel = bounded.match_rel[state as usize];
+                        if rel > 0 {
+                            matches.push(Match {
+                                start: pos - rel as usize,
+                                end: pos,
+                            });
+                            state = initial;
+                        }
+                        continue 'outer;
+                    }
+                    None => break 'outer,
+                }
+            }
+
+            let mt = ml[input[pos] as usize] as usize;
+            state = bounded.transition(b, state, mt)?;
+            let rel = bounded.match_rel[state as usize];
+            if rel > 0 {
+                matches.push(Match {
+                    start: pos - rel as usize,
+                    end: pos,
+                });
+                state = initial;
+            } else {
+                pos += 1;
+            }
+        }
+
+        if state != initial {
+            let node = bounded.states[state as usize];
+            if node != NodeId::MISSING {
+                let best = BDFA::counted_best(node, b);
+                if best > 0 {
+                    matches.push(Match {
+                        start: len - best as usize,
+                        end: len,
+                    });
+                }
+            }
+        }
+
+        Ok(matches)
+    }
+
     fn find_all_fwd_prefix(&self, input: &[u8]) -> Result<Vec<Match>, Error> {
         let fwd_prefix = self.fwd_prefix.as_ref().unwrap();
         let mut matches = Vec::new();
@@ -348,7 +570,6 @@ impl Regex {
         if self.fixed_length == Some(fwd_prefix.len() as u32)
             && fwd_prefix.find_all_literal(input, &mut matches)
         {
-            // done
         } else if let Some(fl) = self.fixed_length {
             while let Some(candidate) = fwd_prefix.find_fwd(input, search_start) {
                 let end = candidate + fl as usize;
@@ -396,9 +617,7 @@ impl Regex {
         let fwd_prefix = self.fwd_prefix.as_ref().unwrap();
         let inner = &mut *self.inner.lock().unwrap();
         let prefix_len = fwd_prefix.len();
-        let num_mt = inner.fwd.num_minterms as usize;
         let initial = inner.fwd.initial;
-        // ensure initial state center transitions are compiled for backward scan
         inner.fwd.precompile_state(&mut inner.b, initial)?;
         let mut matches = Vec::new();
         let mut search_start = 0;
@@ -427,12 +646,11 @@ impl Regex {
                 search_start = candidate + 1;
                 continue;
             }
-            // scan backward: extend match start while initial state stays alive
             let mut match_start = candidate;
             while match_start > search_start {
                 let b = input[match_start - 1];
                 let mt = inner.fwd.minterms_lookup[b as usize] as usize;
-                let delta = initial as usize * num_mt + mt;
+                let delta = (initial as usize) << inner.fwd.mt_log | mt;
                 let in_bounds = delta < inner.fwd.center_table.len();
                 let ct_val = if in_bounds { inner.fwd.center_table[delta] } else { 0 };
                 if in_bounds && ct_val > engine::DFA_DEAD {

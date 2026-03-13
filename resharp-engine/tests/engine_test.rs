@@ -324,7 +324,7 @@ fn complement_bounded_repeat_inter_1() {
     let re = Regex::new("~(_*(\\n_*){2})&[a-z]_*").unwrap();
     let m = re.find_all(b"ab\ncd\nef").unwrap();
     let r: Vec<_> = m.iter().map(|m| (m.start, m.end)).collect();
-    assert!(r[0].1 <= 5, "complement+alpha: got {:?}", r);
+    assert_eq!(r[0], (0, 5), "complement+alpha: got {:?}", r);
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn complement_bounded_repeat_inter_2() {
     let re = Regex::new("~(_*(\\n_*){2})&_*d_*").unwrap();
     let m = re.find_all(b"ab\ncd\nef").unwrap();
     let r: Vec<_> = m.iter().map(|m| (m.start, m.end)).collect();
-    assert!(r[0].1 <= 5, "complement+contains_d: got {:?}", r);
+    assert_eq!(r[0], (0, 5), "complement+contains_d: got {:?}", r);
 }
 
 #[test]
@@ -340,7 +340,7 @@ fn complement_bounded_repeat_inter_3() {
     let re = Regex::new("~(_*(\\n_*){2})&[a-z]_*&_*d_*").unwrap();
     let m = re.find_all(b"ab\ncd\nef").unwrap();
     let r: Vec<_> = m.iter().map(|m| (m.start, m.end)).collect();
-    assert!(r[0].1 <= 5, "complement+alpha+contains_d: got {:?}", r);
+    assert_eq!(r[0], (0, 5), "complement+alpha+contains_d: got {:?}", r);
 }
 
 fn extract_prefix(pattern: &str) -> Vec<u8> {
@@ -444,13 +444,20 @@ fn dictionary_small() {
 
 #[test]
 fn dictionary_context_small() {
-    // let pattern = ".{0,10}(abc|def|ghi|jkl).{0,10}";
     let pattern = ".{0,10}(abc|def|ghi|jkl)";
-    // let input = b"def;jkl;ghi";
     let input = b"def;jkl;ghi";
     let re = Regex::new(pattern).unwrap();
     let m = re.find_all(input).unwrap();
     assert!(!m.is_empty(), "should match");
+}
+
+#[test]
+fn dictionary_context_small_both() {
+    let pattern = ".{0,10}(abc|def|ghi|jkl).{0,10}";
+    let input = b"def;jkl;ghi";
+    let re = Regex::new(pattern).unwrap();
+    let m = re.find_all(input).unwrap();
+    assert!(!m.is_empty(), "should match with prefix+suffix");
 }
 
 #[test]
@@ -505,9 +512,7 @@ fn capacity_exceeded_at_match() {
 }
 
 // -- collect_rev null count tests --
-// BUG: collect_rev produces duplicate/excess nulls for lookahead
-// patterns, causing quadratic behavior in scan_fwd_all.
-// each test documents current (buggy) count vs ideal count.
+// lookahead patterns may produce excess nulls (bounded, not quadratic).
 
 fn rev_nulls(pattern: &str, input: &[u8]) -> Vec<usize> {
     let re = Regex::new(pattern).unwrap();
@@ -531,10 +536,9 @@ fn collect_rev_nulls_sorted_descending() {
 
 #[test]
 fn collect_rev_readme_lookahead_short() {
-    // 3 matches, ideal=3, BUG: 9 nulls [13, 7, 1, 1, 7, 1, 1, 1, 1]
     let nulls = rev_nulls(r"(?<=\s)[A-Z][a-z]+(?=\s)", b" Hello World Foo ");
     eprintln!("readme short: {} nulls {:?}", nulls.len(), nulls);
-    assert!(nulls.len() <= 9); // TODO: fix to <= 3
+    assert!(nulls.len() <= 3);
 }
 
 #[test]
@@ -556,8 +560,7 @@ fn collect_rev_readme_lookahead_scaling() {
         "collect_rev scaling: 10-rep={}, 100-rep={}, 1000-rep={}",
         n10, n100, n1000,
     );
-    // BUG: currently quadratic (65 -> 5150 -> ~500k)
-    // TODO: fix to assert n1000 <= n100 * 12
+    assert!(n1000 <= n100 * 12);
 }
 
 #[test]
@@ -565,7 +568,7 @@ fn collect_rev_lookahead_simple() {
     // 2 matches, ideal=2, BUG: 3 nulls [4, 1, 1] (dup at 1)
     let nulls = rev_nulls(r"a(?=b)", b"_ab_ab_");
     eprintln!("a(?=b): {} nulls {:?}", nulls.len(), nulls);
-    assert!(nulls.len() <= 3); // TODO: fix to <= 2
+    assert!(nulls.len() <= 2);
 }
 
 #[test]
@@ -604,34 +607,30 @@ fn collect_rev_dotstar_lookahead_multiple() {
 
 #[test]
 fn collect_rev_lookahead_word_boundary() {
-    // 1 match, ideal=1, BUG: 4 nulls [2, 1, 0, 0]
     let nulls = rev_nulls(r"a+\b(?=.*---)", b"aaa ---");
     eprintln!("wb: {} nulls {:?}", nulls.len(), nulls);
-    assert!(nulls.len() <= 4); // TODO: fix to <= 1
+    assert!(nulls.len() <= 3);
 }
 
 #[test]
 fn collect_rev_lookbehind_lookahead_combined() {
-    // 2 matches, ideal=2, BUG: 4 nulls [2, 1, 2, 1] (dups)
     let nulls = rev_nulls(r"(?<=a.*).(?=.*c)", b"a__c");
     eprintln!("lb+la: {} nulls {:?}", nulls.len(), nulls);
-    assert!(nulls.len() <= 4); // TODO: fix to <= 2
+    assert!(nulls.len() <= 2);
 }
 
 #[test]
 fn collect_rev_lookahead_class_repetition() {
-    // 2 matches, ideal=2, BUG: 6 nulls [5, 4, 2, 1, 0, 0]
     let nulls = rev_nulls(r"[a-z]+(?=[A-Z])", b"abcDefGhi");
     eprintln!("class rep: {} nulls {:?}", nulls.len(), nulls);
-    assert!(nulls.len() <= 6); // TODO: fix to <= 2
+    assert!(nulls.len() <= 5);
 }
 
 #[test]
 fn collect_rev_lookahead_time_pattern() {
-    // 1 match, ideal=1, BUG: 3 nulls [1, 0, 0]
     let nulls = rev_nulls(r"\d+(?=[aApP]\.?[mM]\.?)", b"10pm");
     eprintln!("time: {} nulls {:?}", nulls.len(), nulls);
-    assert!(nulls.len() <= 3); // TODO: fix to <= 1
+    assert!(nulls.len() <= 2);
 }
 
 #[test]
@@ -1078,5 +1077,352 @@ fn nullable_head_correctness() {
     check(b"xabcx", vec![(1, 4)]);
     check(b"11abc", vec![(1, 5)]); // \d? is at most one digit
     check(b"1abc2abc", vec![(0, 4), (4, 8)]);
+}
+
+#[test]
+fn bounded_dfa_basic() {
+    // intersection with complement: variable length, no prefix, bounded
+    // _*c_*&[a-z]{2,4} = 2-4 lowercase letters containing 'c'
+    let re = Regex::new("_*c_*&[a-z]{2,4}").unwrap();
+    eprintln!("has_accel: {:?}", re.has_accel());
+    let m = re.find_all(b"xycdzz abcde fg").unwrap();
+    let r: Vec<_> = m.iter().map(|m| (m.start, m.end)).collect();
+    eprintln!("bounded result: {:?}", r);
+}
+
+use resharp::{BDFA, NodeId, RegexBuilder};
+
+fn chain_len(node: NodeId, b: &RegexBuilder) -> usize {
+    let mut n = 0;
+    let mut cur = node;
+    while cur != NodeId::MISSING {
+        n += 1;
+        cur = cur.right(b);
+    }
+    n
+}
+
+fn chain_pp(node: NodeId, b: &RegexBuilder) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut cur = node;
+    while cur != NodeId::MISSING {
+        result.push(b.pp(cur));
+        cur = cur.right(b);
+    }
+    result
+}
+
+fn bdfa_step_trace(pattern: &str, input: &[u8]) -> Vec<(usize, u16, usize, u32)> {
+    let mut b = RegexBuilder::new();
+    let node = resharp_parser::parse_ast(&mut b, pattern).unwrap();
+    let mut bdfa = BDFA::new(&mut b, node).unwrap();
+    let mut state = bdfa.initial;
+    let mut trace = Vec::new();
+    for pos in 0..input.len() {
+        let mt = bdfa.minterms_lookup[input[pos] as usize] as usize;
+        state = bdfa.transition(&mut b, state, mt).unwrap();
+        let rel = bdfa.match_rel[state as usize];
+        let clen = chain_len(bdfa.states[state as usize], &b);
+        trace.push((pos, state, clen, rel));
+    }
+    trace
+}
+
+fn bdfa_state_pp(pattern: &str, input: &[u8]) -> Vec<String> {
+    let mut b = RegexBuilder::new();
+    let node = resharp_parser::parse_ast(&mut b, pattern).unwrap();
+    let mut bdfa = BDFA::new(&mut b, node).unwrap();
+    let mut state = bdfa.initial;
+    let mut result = Vec::new();
+    for pos in 0..input.len() {
+        let mt = bdfa.minterms_lookup[input[pos] as usize] as usize;
+        state = bdfa.transition(&mut b, state, mt).unwrap();
+        let rel = bdfa.match_rel[state as usize];
+        let entries = chain_pp(bdfa.states[state as usize], &b);
+        result.push(format!(
+            "pos={} '{}' s={} rel={} [{}]",
+            pos,
+            input[pos] as char,
+            state,
+            rel,
+            entries.join(", ")
+        ));
+    }
+    result
+}
+
+fn bdfa_matches(pattern: &str, input: &[u8]) -> Vec<(usize, usize)> {
+    let mut b = RegexBuilder::new();
+    let node = resharp_parser::parse_ast(&mut b, pattern).unwrap();
+    let mut bdfa = BDFA::new(&mut b, node).unwrap();
+    let mut state = bdfa.initial;
+    let mut matches = Vec::new();
+    let mut pos = 0;
+    while pos < input.len() {
+        let mt = bdfa.minterms_lookup[input[pos] as usize] as usize;
+        state = bdfa.transition(&mut b, state, mt).unwrap();
+        let rel = bdfa.match_rel[state as usize];
+        if rel > 0 {
+            let end = pos;
+            let start = end - rel as usize;
+            matches.push((start, end));
+            state = bdfa.initial;
+            continue;
+        }
+        pos += 1;
+    }
+    // flush
+    if state != bdfa.initial {
+        let node = bdfa.states[state as usize];
+        if node != NodeId::MISSING {
+            let best = BDFA::counted_best(node, &b);
+            if best > 0 {
+                let end = input.len();
+                let start = end - best as usize;
+                matches.push((start, end));
+            }
+        }
+    }
+    matches
+}
+
+#[test]
+fn bdfa_literal_abc() {
+    // simple literal: each step should accumulate one more candidate
+    let trace = bdfa_step_trace("abc", b"xabcx");
+    eprintln!("abc on 'xabcx':");
+    for &(pos, s, vl, rel) in &trace {
+        eprintln!("  pos={} state={} vec_len={} rel={}", pos, s, vl, rel);
+    }
+    // after 'c' at pos=3, should have a match with rel=3
+    assert!(trace.iter().any(|&(_, _, _, rel)| rel == 3), "expected match with rel=3");
+}
+
+#[test]
+fn bdfa_literal_abc_states() {
+    let pp = bdfa_state_pp("abc", b"xabcx");
+    for line in &pp {
+        eprintln!("{}", line);
+    }
+}
+
+#[test]
+fn bdfa_alternation_ab_cd() {
+    assert_bdfa_eq("ab|cd", b"xabcdx");
+}
+
+#[test]
+fn bdfa_bounded_repeat() {
+    // a{2,4}: variable length, bounded
+    let pp = bdfa_state_pp("a{2,4}", b"xaaaaax");
+    eprintln!("a{{2,4}} on 'xaaaaax':");
+    for line in &pp {
+        eprintln!("{}", line);
+    }
+    let trace = bdfa_step_trace("a{2,4}", b"xaaaaax");
+    let match_positions: Vec<_> = trace.iter().filter(|t| t.3 > 0).map(|t| (t.0, t.3)).collect();
+    eprintln!("matches: {:?}", match_positions);
+}
+
+#[test]
+fn bdfa_two_candidates() {
+    assert_bdfa_eq("aa", b"aaa");
+}
+
+// --- derivative traces for (curr, last_nullable) pairs ---
+
+#[test]
+fn bdfa_der_a_or_aa() {
+    let pp = bdfa_state_pp("a|aa", b"aab");
+    eprintln!("a|aa on 'aab':");
+    for line in &pp { eprintln!("{}", line); }
+}
+
+#[test]
+fn bdfa_der_a_1_4() {
+    let pp = bdfa_state_pp("a{1,4}", b"aaaax");
+    eprintln!("a{{1,4}} on 'aaaax':");
+    for line in &pp { eprintln!("{}", line); }
+}
+
+#[test]
+fn bdfa_der_ab_1_3() {
+    let pp = bdfa_state_pp("(ab){1,3}", b"abababx");
+    eprintln!("(ab){{1,3}} on 'abababx':");
+    for line in &pp { eprintln!("{}", line); }
+}
+
+#[test]
+fn bdfa_der_abc_bcd() {
+    let pp = bdfa_state_pp("abc|bcd", b"abcde");
+    eprintln!("abc|bcd on 'abcde':");
+    for line in &pp { eprintln!("{}", line); }
+}
+
+#[test]
+fn bdfa_der_nested_alt() {
+    let pp = bdfa_state_pp("(a|ab)(b|c)", b"abcx");
+    eprintln!("(a|ab)(b|c) on 'abcx':");
+    for line in &pp { eprintln!("{}", line); }
+}
+
+// --- ambiguous cases: bdfa must match std engine (leftmost longest) ---
+
+fn assert_bdfa_eq(pattern: &str, input: &[u8]) {
+    let m = bdfa_matches(pattern, input);
+    let re = Regex::new(pattern).unwrap();
+    let std_m: Vec<_> = re.find_all(input).unwrap().iter().map(|m| (m.start, m.end)).collect();
+    assert_eq!(m, std_m, "pattern={:?} input={:?}", pattern, String::from_utf8_lossy(input));
+}
+
+#[test]
+fn bdfa_ambiguous_a_or_aa() {
+    // std: (0,2); bdfa currently gives (0,1),(1,2)
+    assert_bdfa_eq("a|aa", b"aab");
+}
+
+#[test]
+fn bdfa_ambiguous_ab_or_a() {
+    // std: (0,2),(2,4); bdfa currently gives (0,1),(2,3)
+    assert_bdfa_eq("ab|a", b"abab");
+}
+
+#[test]
+fn bdfa_ambiguous_repeat_ab_1_3() {
+    // std: (0,6); bdfa currently gives (0,2),(2,4),(4,6)
+    assert_bdfa_eq("(ab){1,3}", b"abababx");
+}
+
+#[test]
+fn bdfa_ambiguous_overlap_abc_bcd() {
+    // std: (0,3); bdfa agrees
+    assert_bdfa_eq("abc|bcd", b"abcde");
+}
+
+#[test]
+fn bdfa_ambiguous_a_1_4_greedy() {
+    // std: (0,4); bdfa currently gives (0,1),(1,2),(2,3),(3,4)
+    assert_bdfa_eq("a{1,4}", b"aaaa");
+}
+
+#[test]
+fn bdfa_ambiguous_nested_alt() {
+    // std: (0,3); bdfa currently gives (0,2)
+    assert_bdfa_eq("(a|ab)(b|c)", b"abcx");
+}
+
+#[test]
+fn bdfa_ambiguous_triple_overlap() {
+    // std: (0,4),(4,6); bdfa currently gives (0,2),(2,4),(4,6)
+    assert_bdfa_eq("a{2,4}", b"aaaaaa");
+}
+
+// -- multi-match overlap tests
+
+#[test]
+fn bdfa_multi_match_overlap() {
+    assert_bdfa_eq("a{2,4}", b"aaaaaaaaa");
+    assert_bdfa_eq("ab|a", b"ababababab");
+    assert_bdfa_eq("(ab){1,3}", b"ababababababab");
+    assert_bdfa_eq("abc|bcd", b"xabcbcdabcdy");
+    assert_bdfa_eq("[a-c]{2,3}", b"abcabcabc");
+}
+
+#[test]
+fn bdfa_multi_match_traces() {
+    let pp = bdfa_state_pp("a{2,4}", b"aaaaaaaaa");
+    eprintln!("a{{2,4}} on 'aaaaaaaaa' (multi-match):");
+    for line in &pp { eprintln!("  {}", line); }
+    let m = bdfa_matches("a{2,4}", b"aaaaaaaaa");
+    eprintln!("  matches: {:?}", m);
+}
+
+// -- prefix acceleration tests
+
+#[test]
+fn bdfa_prefix_literal() {
+    // "Twain.{0,5}" has literal prefix "Twain", BDFA should skip to it
+    assert_bdfa_eq("Twain.{0,5}", b"xxxx Twain was here, Twainyyy end");
+}
+
+#[test]
+fn bdfa_prefix_predicate() {
+    // [A-Z][a-z]{1,3} has deterministic prefix [A-Z]
+    assert_bdfa_eq("[A-Z][a-z]{1,3}", b"Hello World Foo B xy");
+}
+
+#[test]
+fn bdfa_prefix_predicate_pp() {
+    let pp = bdfa_state_pp("[A-Z][a-z]{1,3}", b"Hello World Foo B xy");
+    for line in &pp {
+        eprintln!("{}", line);
+    }
+    assert_eq!(pp, vec![
+        "pos=0 'H' s=2 rel=0 [#([a-z]{1,3})s1b0]",
+        "pos=1 'e' s=3 rel=0 [#((|(|[a-z])[a-z]))s2b2]",
+        "pos=2 'l' s=4 rel=0 [#((|[a-z]))s3b3]",
+        "pos=3 'l' s=5 rel=0 [#()s4b4]",
+        "pos=4 'o' s=6 rel=4 [#(\u{22a5})s5b4]",
+        "pos=5 ' ' s=7 rel=4 [#(\u{22a5})s6b4]",
+        "pos=6 'W' s=8 rel=4 [#(\u{22a5})s7b4, #([a-z]{1,3})s1b0]",
+        "pos=7 'o' s=9 rel=4 [#(\u{22a5})s8b4, #((|(|[a-z])[a-z]))s2b2]",
+        "pos=8 'r' s=10 rel=4 [#(\u{22a5})s9b4, #((|[a-z]))s3b3]",
+        "pos=9 'l' s=11 rel=4 [#(\u{22a5})s10b4, #()s4b4]",
+        "pos=10 'd' s=12 rel=4 [#(\u{22a5})s11b4, #(\u{22a5})s5b4]",
+        "pos=11 ' ' s=13 rel=4 [#(\u{22a5})s12b4, #(\u{22a5})s6b4]",
+        "pos=12 'F' s=14 rel=4 [#(\u{22a5})s13b4, #(\u{22a5})s7b4, #([a-z]{1,3})s1b0]",
+        "pos=13 'o' s=15 rel=4 [#(\u{22a5})s14b4, #(\u{22a5})s8b4, #((|(|[a-z])[a-z]))s2b2]",
+        "pos=14 'o' s=16 rel=4 [#(\u{22a5})s15b4, #(\u{22a5})s9b4, #((|[a-z]))s3b3]",
+        "pos=15 ' ' s=17 rel=4 [#(\u{22a5})s16b4, #(\u{22a5})s10b4, #(\u{22a5})s4b3]",
+        "pos=16 'B' s=18 rel=4 [#(\u{22a5})s17b4, #(\u{22a5})s11b4, #(\u{22a5})s5b3, #([a-z]{1,3})s1b0]",
+        "pos=17 ' ' s=19 rel=4 [#(\u{22a5})s18b4, #(\u{22a5})s12b4, #(\u{22a5})s6b3]",
+        "pos=18 'x' s=20 rel=4 [#(\u{22a5})s19b4, #(\u{22a5})s13b4, #(\u{22a5})s7b3]",
+        "pos=19 'y' s=21 rel=4 [#(\u{22a5})s20b4, #(\u{22a5})s14b4, #(\u{22a5})s8b3]",
+    ]);
+}
+
+#[test]
+fn bdfa_prefix_has_prefix() {
+    // verify the BDFA actually built a prefix for a literal pattern
+    let mut b = RegexBuilder::new();
+    let node = resharp_parser::parse_ast(&mut b, "Twain.{0,5}").unwrap();
+    let bdfa = BDFA::new(&mut b, node).unwrap();
+    assert!(bdfa.prefix.is_some(), "expected prefix for Twain.{{0,5}}");
+    assert!(bdfa.prefix_len >= 5, "expected prefix_len >= 5, got {}", bdfa.prefix_len);
+}
+
+fn bdfa_state_pp_bytes(pattern: &str, input: &[u8]) -> Vec<String> {
+    let mut b = RegexBuilder::new();
+    let node = resharp_parser::parse_ast(&mut b, pattern).unwrap();
+    let mut bdfa = BDFA::new(&mut b, node).unwrap();
+    let mut state = bdfa.initial;
+    let mut result = Vec::new();
+    for pos in 0..input.len() {
+        let mt = bdfa.minterms_lookup[input[pos] as usize] as usize;
+        state = bdfa.transition(&mut b, state, mt).unwrap();
+        let rel = bdfa.match_rel[state as usize];
+        let entries = chain_pp(bdfa.states[state as usize], &b);
+        result.push(format!(
+            "pos={} 0x{:02x} s={} rel={} [{}]",
+            pos, input[pos], state, rel, entries.join(", ")
+        ));
+    }
+    result
+}
+
+#[test]
+fn bdfa_aws_key() {
+    assert_bdfa_eq(
+        r"((?:ASIA|AKIA|AROA|AIDA)([A-Z0-7]{16}))",
+        b"xxx AKIAIOSFODNN7EXAMPLE yyy",
+    );
+}
+
+#[test]
+fn bdfa_cyrillic_names() {
+    assert_bdfa_eq(
+        "Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти",
+        "zzz Шерлок Холмс и Джон Уотсон zzz".as_bytes(),
+    );
 }
 

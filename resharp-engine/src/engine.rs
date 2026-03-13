@@ -8,7 +8,8 @@ use crate::accel::MintermSearchValue;
 use crate::{Error, Match};
 
 pub const NO_MATCH: usize = usize::MAX;
-pub const DFA_DEAD: u16 = 1; // 0 = missing
+pub const DFA_MISSING: u16 = 0;
+pub const DFA_DEAD: u16 = 1;
 
 struct PartitionTree {
     sets: Vec<TSetId>,
@@ -123,7 +124,7 @@ pub fn collect_sets(b: &RegexBuilder, start_id: NodeId) -> HashSet<TSetId> {
                         stack.push(node_id.left(b));
                         stack.push(node_id.right(b));
                     }
-                    Kind::Lookahead | Kind::Lookbehind => {
+                    Kind::Lookahead | Kind::Lookbehind | Kind::Counted => {
                         stack.push(node_id.left(b));
                         stack.push(node_id.right(b));
                     }
@@ -163,7 +164,6 @@ fn collect_derivative_targets(
     }
 }
 
-/// strip leading stars and lookbehinds from reversed pattern for prefix computation.
 fn get_prefix_node(b: &mut RegexBuilder, node: NodeId) -> NodeId {
     match b.get_kind(node) {
         Kind::Concat => {
@@ -233,7 +233,7 @@ fn calc_prefix_sets_inner(
     Ok(result)
 }
 
-/// linear prefix character sets from the reversed pattern.
+/// prefix character sets from the reversed pattern.
 pub fn calc_prefix_sets(
     b: &mut RegexBuilder,
     rev_start: NodeId,
@@ -241,7 +241,7 @@ pub fn calc_prefix_sets(
     calc_prefix_sets_inner(b, rev_start, true)
 }
 
-/// prefix walk
+/// prefix walk for potential match start positions.
 pub fn calc_potential_start(
     b: &mut RegexBuilder,
     rev_start: NodeId,
@@ -295,9 +295,37 @@ pub fn calc_potential_start(
     Ok(result)
 }
 
-/// build a forward prefix search, picking the rarest BFS position for memchr.
-/// returns (prefix_search, stars_stripped) - stars_stripped means match start
-/// may be before the prefix candidate position.
+/// fwd literal prefix for patterns with no star-stripping.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn build_strict_literal_prefix(
+    b: &mut RegexBuilder,
+    node: NodeId,
+) -> Result<Option<crate::accel::FwdPrefixSearch>, crate::Error> {
+    let sets = calc_prefix_sets_inner(b, node, false)?;
+    if sets.is_empty() {
+        return Ok(None);
+    }
+    let byte_sets: Vec<Vec<u8>> = sets.iter().map(|&s| b.solver().collect_bytes(s)).collect();
+    if !byte_sets.iter().all(|bs| bs.len() == 1) {
+        return Ok(None);
+    }
+    let needle: Vec<u8> = byte_sets.iter().map(|bs| bs[0]).collect();
+    let lit = crate::simd::FwdLiteralSearch::new(&needle);
+    if crate::simd::BYTE_FREQ[lit.rare_byte() as usize] >= 100 {
+        return Ok(None);
+    }
+    Ok(Some(crate::accel::FwdPrefixSearch::Literal(lit)))
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub fn build_strict_literal_prefix(
+    _b: &mut RegexBuilder,
+    _node: NodeId,
+) -> Result<Option<crate::accel::FwdPrefixSearch>, crate::Error> {
+    Ok(None)
+}
+
+/// fwd prefix search, picking the rarest position for memchr.
 pub fn build_fwd_prefix(
     b: &mut RegexBuilder,
     node: NodeId,
@@ -404,13 +432,14 @@ fn skip_is_profitable(bytes: &[u8]) -> bool {
     freq_sum < 2000
 }
 
-pub struct LazyDFA {
+pub struct LDFA {
     pub initial: u16,
     pub begin_table: Vec<u16>,
     pub center_table: Vec<u16>,
     pub effects_id: Vec<u16>,
     pub effects: Vec<Vec<NullState>>,
     pub num_minterms: u32,
+    pub mt_log: u32,
     pub minterms_lookup: [u8; 256],
 
     pub minterms: Vec<TSetId>,
@@ -419,16 +448,16 @@ pub struct LazyDFA {
     pub skip_ids: Vec<u8>,
     pub skip_searchers: Vec<MintermSearchValue>,
     pub prefix_skip: Option<crate::accel::RevPrefixSearch>,
-    pub prefix_transition: u32,
+    _prefix_transition: u32, // reserved: DFA state after consuming prefix (unused, per-byte walk used instead)
     pub max_capacity: usize,
 }
 
-impl LazyDFA {
+impl LDFA {
     pub fn new(
         b: &mut RegexBuilder,
         initial: NodeId,
         max_capacity: usize,
-    ) -> Result<LazyDFA, Error> {
+    ) -> Result<LDFA, Error> {
         let sets = collect_sets(b, initial);
         let minterms = PartitionTree::generate_minterms(sets, b.solver());
         let u8_lookup = PartitionTree::minterms_lookup(&minterms, b.solver());
@@ -442,7 +471,6 @@ impl LazyDFA {
 
         let mut effects_id: Vec<u16> = vec![0u16; 2]; // slots 0,1
 
-        // register initial state
         let initial_sid = state_nodes.len() as u16;
         state_nodes.push(initial);
         node_to_state.insert(initial, initial_sid);
@@ -460,20 +488,23 @@ impl LazyDFA {
             begin_table[idx] = sid;
         }
         let num_minterms = minterms.len() as u32;
-        let center_table_size = state_nodes.len() * num_minterms as usize;
-        let center_table = vec![0u16; center_table_size];
+        let mt_log = (num_minterms as usize).next_power_of_two().trailing_zeros();
+        let stride = 1usize << mt_log;
+        let center_table_size = state_nodes.len() * stride;
+        let center_table = vec![DFA_MISSING; center_table_size];
 
         let effects = b.nulls_as_vecs();
 
         let skip_ids = vec![0u8; state_nodes.len()];
 
-        Ok(LazyDFA {
+        Ok(LDFA {
             initial: initial_sid,
             begin_table,
             center_table,
             effects_id,
             effects,
             num_minterms,
+            mt_log,
             minterms_lookup: u8_lookup,
             minterms,
             state_nodes,
@@ -481,14 +512,14 @@ impl LazyDFA {
             skip_ids,
             skip_searchers: Vec::new(),
             prefix_skip: None,
-            prefix_transition: 0,
+            _prefix_transition: DFA_MISSING as u32,
             max_capacity,
         })
     }
 
     #[inline(always)]
     pub fn dfa_delta(&self, state_id: u16, mt: u32) -> usize {
-        (state_id as u32 * self.num_minterms + mt) as usize
+        ((state_id as u32) << self.mt_log | mt) as usize
     }
 
     pub fn ensure_capacity(&mut self, state_id: u16) {
@@ -498,11 +529,12 @@ impl LazyDFA {
             let new_len = new_len.max(cap);
             self.effects_id.resize(new_len, 0u16);
         }
-        let needed = cap * self.num_minterms as usize;
+        let stride = 1usize << self.mt_log;
+        let needed = cap * stride;
         if needed > self.center_table.len() {
             let new_len = self.center_table.len().max(4) * 2;
             let new_len = new_len.max(needed);
-            self.center_table.resize(new_len, 0u16);
+            self.center_table.resize(new_len, DFA_MISSING);
         }
         if cap > self.skip_ids.len() {
             let new_len = self.skip_ids.len().max(4) * 2;
@@ -529,7 +561,7 @@ impl LazyDFA {
         minterm_idx: u32,
     ) -> Result<u16, Error> {
         let delta = self.dfa_delta(state_id, minterm_idx);
-        if delta < self.center_table.len() && self.center_table[delta] != 0 {
+        if delta < self.center_table.len() && self.center_table[delta] != DFA_MISSING {
             return Ok(self.center_table[delta]);
         }
         self.lazy_transition_slow(b, state_id, minterm_idx)
@@ -620,7 +652,11 @@ impl LazyDFA {
         true
     }
 
-    pub(crate) fn precompile_state(&mut self, b: &mut RegexBuilder, state_id: u16) -> Result<(), Error> {
+    pub(crate) fn precompile_state(
+        &mut self,
+        b: &mut RegexBuilder,
+        state_id: u16,
+    ) -> Result<(), Error> {
         if state_id == DFA_DEAD {
             return Ok(());
         }
@@ -628,7 +664,7 @@ impl LazyDFA {
         let sder = b.der(node, Nullability::CENTER).map_err(Error::Algebra)?;
         for mt_idx in 0..self.minterms.len() {
             let delta = self.dfa_delta(state_id, mt_idx as u32);
-            if delta < self.center_table.len() && self.center_table[delta] != 0 {
+            if delta < self.center_table.len() && self.center_table[delta] != DFA_MISSING {
                 continue;
             }
             let mt = self.minterms[mt_idx];
@@ -658,6 +694,7 @@ impl LazyDFA {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn try_build_skip_simd(&mut self, state: usize) {
         let num_mt = self.num_minterms as usize;
+        let stride = 1usize << self.mt_log;
         if state >= self.skip_ids.len() || self.skip_ids[state] != 0 {
             return;
         }
@@ -665,12 +702,12 @@ impl LazyDFA {
         if is_nullable && !self.can_skip() {
             return;
         }
-        let base = state * num_mt;
-        if base + num_mt > self.center_table.len() {
+        let base = state * stride;
+        if base + stride > self.center_table.len() {
             return;
         }
         let row = &self.center_table[base..base + num_mt];
-        let zeros = row.iter().filter(|&&x| x == 0).count();
+        let zeros = row.iter().filter(|&&x| x == DFA_MISSING).count();
         if zeros > 0 {
             return;
         }
@@ -725,7 +762,9 @@ impl LazyDFA {
             }
         }
         self.skip_searchers
-            .push(MintermSearchValue::Exact(crate::simd::RevSearchBytes::new(bytes)));
+            .push(MintermSearchValue::Exact(crate::simd::RevSearchBytes::new(
+                bytes,
+            )));
         self.skip_searchers.len() as u8
     }
 
@@ -739,8 +778,9 @@ impl LazyDFA {
                 }
             }
         }
-        self.skip_searchers
-            .push(MintermSearchValue::Range(crate::simd::RevSearchRanges::new(ranges)));
+        self.skip_searchers.push(MintermSearchValue::Range(
+            crate::simd::RevSearchRanges::new(ranges),
+        ));
         self.skip_searchers.len() as u8
     }
 
@@ -792,7 +832,7 @@ impl LazyDFA {
                 effects: self.effects.as_ptr(),
                 data: data.as_ptr(),
                 minterms_lookup: self.minterms_lookup.as_ptr(),
-                num_mt: self.num_minterms,
+                mt_log: self.mt_log,
             };
 
             let (state, new_pos, new_max, cache_miss) =
@@ -850,19 +890,25 @@ impl LazyDFA {
         b: &mut RegexBuilder,
         nulls: &[usize],
         data: &[u8],
+        max_length: Option<u32>,
         matches: &mut Vec<Match>,
     ) -> Result<(), Error> {
-        let end = data.len();
-        if end == 0 || nulls.is_empty() {
+        let data_end = data.len();
+        if data_end == 0 || nulls.is_empty() {
             return Ok(());
         }
 
         let mut skip_until = 0usize;
 
         for &begin_pos in nulls.iter().rev() {
-            if begin_pos < skip_until || begin_pos >= end {
+            if begin_pos < skip_until || begin_pos >= data_end {
                 continue;
             }
+
+            let end = match max_length {
+                Some(ml) => (begin_pos + ml as usize).min(data_end),
+                None => data_end,
+            };
 
             let mt = self.minterms_lookup[data[begin_pos] as usize];
             let mut curr = self.begin_table[mt as usize] as u32;
@@ -895,7 +941,7 @@ impl LazyDFA {
                         effects: self.effects.as_ptr(),
                         data: data.as_ptr(),
                         minterms_lookup: self.minterms_lookup.as_ptr(),
-                        num_mt: self.num_minterms,
+                        mt_log: self.mt_log,
                     };
 
                     let (state, new_pos, new_max, cache_miss) =
@@ -971,7 +1017,7 @@ impl LazyDFA {
         Ok(state as u32)
     }
 
-    /// scan forward from a precomputed DFA state, skipping begin_table lookup.
+    /// scan forward from a precomputed DFA state.
     pub fn scan_fwd_from(
         &mut self,
         b: &mut RegexBuilder,
@@ -1015,7 +1061,7 @@ impl LazyDFA {
                 effects: self.effects.as_ptr(),
                 data: data.as_ptr(),
                 minterms_lookup: self.minterms_lookup.as_ptr(),
-                num_mt: self.num_minterms,
+                mt_log: self.mt_log,
             };
 
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -1081,7 +1127,11 @@ impl LazyDFA {
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    fn compute_skip_simd(&mut self, _b: &mut RegexBuilder, _rev_start: NodeId) -> Result<(), Error> {
+    fn compute_skip_simd(
+        &mut self,
+        _b: &mut RegexBuilder,
+        _rev_start: NodeId,
+    ) -> Result<(), Error> {
         Ok(())
     }
 
@@ -1121,7 +1171,6 @@ impl LazyDFA {
                 .iter()
                 .map(|bytes| crate::accel::TSet::from_bytes(bytes))
                 .collect();
-            // pre-compute the DFA state after consuming all prefix bytes
             let mut current_node = self.state_nodes[self.initial as usize];
             for &set in &sets {
                 let der = b
@@ -1137,7 +1186,7 @@ impl LazyDFA {
             }
             let sid = self.get_or_register(b, current_node);
             self.ensure_capacity(sid);
-            self.prefix_transition = sid as u32;
+            self._prefix_transition = sid as u32;
 
             self.prefix_skip = Some(crate::accel::RevPrefixSearch::new(
                 sets.len(),
@@ -1170,7 +1219,6 @@ impl LazyDFA {
         if !crate::simd::has_simd() {
             return;
         }
-        // precompile reachable states from initial via center transitions
         use std::collections::VecDeque;
         let mut todo: VecDeque<u16> = VecDeque::new();
         let mut visited = HashSet::new();
@@ -1259,7 +1307,7 @@ impl LazyDFA {
                 effects: self.effects.as_ptr(),
                 data: data.as_ptr(),
                 minterms_lookup: self.minterms_lookup.as_ptr(),
-                num_mt: self.num_minterms,
+                mt_log: self.mt_log,
             };
 
             let use_skip = self.can_skip();
@@ -1346,13 +1394,12 @@ impl LazyDFA {
             curr = self.initial as u32;
             pos = match_pos + 1;
         }
-        // walk prefix bytes through center_table
         let prefix_end = match_pos + 1 - prefix_len;
         while pos > prefix_end {
             pos -= 1;
             let mt = self.minterms_lookup[data[pos] as usize] as u32;
             let mut delta = self.dfa_delta(curr as u16, mt);
-            if delta >= self.center_table.len() || self.center_table[delta] == 0 {
+            if delta >= self.center_table.len() || self.center_table[delta] == DFA_MISSING {
                 self.precompile_state(b, curr as u16)?;
                 delta = self.dfa_delta(curr as u16, mt);
             }
@@ -1380,7 +1427,7 @@ impl LazyDFA {
                 effects: self.effects.as_ptr(),
                 data: data.as_ptr(),
                 minterms_lookup: self.minterms_lookup.as_ptr(),
-                num_mt: self.num_minterms,
+                mt_log: self.mt_log,
             };
 
             let use_skip = self.can_skip();
@@ -1451,7 +1498,7 @@ impl LazyDFA {
                 effects: self.effects.as_ptr(),
                 data: data.as_ptr(),
                 minterms_lookup: self.minterms_lookup.as_ptr(),
-                num_mt: self.num_minterms,
+                mt_log: self.mt_log,
             };
 
             let (state, new_pos, found, cache_miss) = any_null_rev_noskip(&tables, curr, pos);
@@ -1551,7 +1598,7 @@ struct ScanTables {
     effects: *const Vec<NullState>,
     data: *const u8,
     minterms_lookup: *const u8,
-    num_mt: u32,
+    mt_log: u32,
 }
 
 #[cold]
@@ -1609,7 +1656,7 @@ fn collect_rev_noskip(
     let effects_id = t.effects_id;
     let data = t.data;
     let minterms_lookup = t.minterms_lookup;
-    let num_mt = t.num_mt;
+    let mt_log = t.mt_log;
     let mut prev_eid: u32 = 0;
     while pos != 0 {
         pos -= 1;
@@ -1640,9 +1687,9 @@ fn collect_rev_noskip(
                     collect_rev_complex(t.effects, prev_eid, pos + 1, Nullability::CENTER, nulls);
                 }
             }
-            let delta = (curr * num_mt + mt) as usize;
+            let delta = (curr << mt_log | mt) as usize;
             let next = *center_table.add(delta);
-            if next == 0 {
+            if next == DFA_MISSING {
                 return (curr, pos, true); // cache miss
             }
             if next == DFA_DEAD {
@@ -1668,15 +1715,15 @@ fn any_null_rev_noskip(t: &ScanTables, mut curr: u32, mut pos: usize) -> (u32, u
     let center_table = t.center_table;
     let effects_id = t.effects_id;
     let minterms_lookup = t.minterms_lookup;
-    let num_mt = t.num_mt;
+    let mt_log = t.mt_log;
     while pos != 0 {
         pos -= 1;
 
         unsafe {
             let mt = *minterms_lookup.add(*t.data.add(pos) as usize) as u32;
-            let delta = (curr * num_mt + mt) as usize;
+            let delta = (curr << mt_log | mt) as usize;
             let next = *center_table.add(delta);
-            if next == 0 {
+            if next == DFA_MISSING {
                 return (curr, pos, false, true); // cache miss
             }
             if next == DFA_DEAD {
@@ -1712,7 +1759,7 @@ fn collect_rev_skip(
     let effects_id = t.effects_id;
     let effects = t.effects;
     let minterms_lookup = t.minterms_lookup;
-    let num_mt = t.num_mt;
+    let mt_log = t.mt_log;
     while pos != 0 {
         let sid = skip_ids[curr as usize];
         if sid != 0 {
@@ -1739,13 +1786,7 @@ fn collect_rev_skip(
                         }
                     } else {
                         for p in (pos..=old_pos).rev() {
-                            collect_rev_complex(
-                                effects,
-                                eid,
-                                p,
-                                Nullability::CENTER,
-                                nulls,
-                            );
+                            collect_rev_complex(effects, eid, p, Nullability::CENTER, nulls);
                         }
                     }
                 }
@@ -1764,9 +1805,9 @@ fn collect_rev_skip(
                         collect_rev_complex(effects, prev_eid, pos + 1, Nullability::CENTER, nulls);
                     }
                 }
-                let delta = (curr * num_mt + mt) as usize;
+                let delta = (curr << mt_log | mt) as usize;
                 let next = *center_table.add(delta);
-                if next == 0 {
+                if next == DFA_MISSING {
                     return (curr, pos, true); // cache miss
                 }
                 if next == DFA_DEAD {
@@ -1823,7 +1864,7 @@ fn scan_fwd_noskip(
     let effects_id = t.effects_id;
     let data = t.data;
     let minterms_lookup = t.minterms_lookup;
-    let num_mt = t.num_mt;
+    let mt_log = t.mt_log;
     let mut prev_eid: u32 = 0;
     while pos < end {
         unsafe {
@@ -1836,9 +1877,9 @@ fn scan_fwd_noskip(
                         scan_fwd_complex(t.effects, prev_eid, pos, Nullability::CENTER, max_end);
                 }
             }
-            let delta = (curr * num_mt + mt) as usize;
+            let delta = (curr << mt_log | mt) as usize;
             let next = *center_table.add(delta);
-            if next == 0 {
+            if next == DFA_MISSING {
                 return (curr, pos, max_end, true); // cache miss
             }
             if next == DFA_DEAD {
@@ -1874,7 +1915,7 @@ fn scan_fwd_skip(
     let effects = t.effects;
     let data = t.data;
     let minterms_lookup = t.minterms_lookup;
-    let num_mt = t.num_mt;
+    let mt_log = t.mt_log;
 
     while pos < end {
         let sid = skip_ids[curr as usize];
@@ -1921,7 +1962,6 @@ fn scan_fwd_skip(
             }
         }
 
-        // inner noskip loop until we hit a skippable state or cache miss
         let mut prev_eid: u32 = 0;
         while pos < end {
             unsafe {
@@ -1934,9 +1974,9 @@ fn scan_fwd_skip(
                             scan_fwd_complex(effects, prev_eid, pos, Nullability::CENTER, max_end);
                     }
                 }
-                let delta = (curr * num_mt + mt) as usize;
+                let delta = (curr << mt_log | mt) as usize;
                 let next = *center_table.add(delta);
-                if next == 0 {
+                if next == DFA_MISSING {
                     return (curr, pos, max_end, true);
                 }
                 if next == DFA_DEAD {
@@ -1975,7 +2015,6 @@ fn scan_fwd_skip(
     (curr, pos, max_end, false)
 }
 
-/// register a node as a DFA state, returning its StateId (u16).
 fn register_state(
     state_nodes: &mut Vec<NodeId>,
     node_to_state: &mut HashMap<NodeId, u16>,
@@ -1995,4 +2034,300 @@ fn register_state(
     }
     effects_id[sid as usize] = eff_id.0 as u16;
     sid
+}
+
+/// bounded DFA for opportunistic matching with known max_length.
+/// only exists for a slight (20-30%) performance boost on short patterns
+pub struct BDFA {
+    initial_node: NodeId,
+    /// states as Counted node chains.
+    pub states: Vec<NodeId>,
+    state_map: HashMap<NodeId, u16>,
+    /// transition table (state << mt_log | mt -> state).
+    pub table: Vec<u16>,
+    /// match rel per state (0 = no match).
+    pub match_rel: Vec<u32>,
+    /// number of minterms.
+    pub num_mt: usize,
+    /// log2 of minterm stride.
+    pub mt_log: u32,
+    minterms: Vec<TSetId>,
+    /// byte -> minterm index.
+    pub minterms_lookup: [u8; 256],
+    /// initial state id.
+    pub initial: u16,
+    /// SIMD prefix search.
+    pub prefix: Option<crate::accel::FwdPrefixSearch>,
+    /// prefix length in bytes.
+    pub prefix_len: usize,
+    /// state after transitioning through the prefix.
+    pub after_prefix: u16,
+}
+
+impl BDFA {
+    /// construct from a pattern node.
+    pub fn new(b: &mut RegexBuilder, pattern_node: NodeId) -> Result<Self, Error> {
+        let initial_node = b.mk_counted(pattern_node, NodeId::MISSING, 0);
+        let sets = collect_sets(b, initial_node);
+        let minterms = PartitionTree::generate_minterms(sets, b.solver());
+        let minterms_lookup = PartitionTree::minterms_lookup(&minterms, b.solver());
+        let num_mt = minterms.len();
+        let mt_log = num_mt.next_power_of_two().trailing_zeros();
+        let stride = 1usize << mt_log;
+
+        // state 0 = uncached sentinel (unused), state 1 = MISSING (no active candidates)
+        let mut dfa = BDFA {
+            initial_node,
+            states: vec![NodeId::MISSING, NodeId::MISSING],
+            state_map: HashMap::new(),
+            table: vec![DFA_MISSING; stride * 2],
+            match_rel: vec![0, 0],
+            num_mt,
+            mt_log,
+            minterms,
+            minterms_lookup,
+            initial: 1,
+            prefix: None,
+            prefix_len: 0,
+            after_prefix: 1,
+        };
+        dfa.state_map.insert(NodeId::MISSING, 1);
+        dfa.build_prefix(b, pattern_node)?;
+        Ok(dfa)
+    }
+
+    fn build_prefix(&mut self, b: &mut RegexBuilder, pattern_node: NodeId) -> Result<(), Error> {
+        if !crate::simd::has_simd() {
+            return Ok(());
+        }
+        let prefix_sets = calc_prefix_sets_inner(b, pattern_node, false)?;
+        if prefix_sets.is_empty() {
+            return Ok(());
+        }
+
+        let byte_sets_raw: Vec<Vec<u8>> = prefix_sets
+            .iter()
+            .map(|&s| b.solver_ref().collect_bytes(s))
+            .collect();
+
+        let search = Self::build_prefix_search(&byte_sets_raw);
+        let search = match search {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let mut state = self.initial;
+        for &set in &prefix_sets {
+            let mt_idx = self.minterms.iter().position(|&mt| {
+                let mt_set = b.solver_ref().get_set(mt);
+                let prefix_set = b.solver_ref().get_set(set);
+                Solver::is_sat(&mt_set, &prefix_set)
+            });
+            match mt_idx {
+                Some(idx) => state = self.transition(b, state, idx)?,
+                None => return Ok(()), // shouldn't happen
+            }
+        }
+
+        self.prefix = Some(search);
+        self.prefix_len = prefix_sets.len();
+        self.after_prefix = state;
+        Ok(())
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn build_prefix_search(byte_sets_raw: &[Vec<u8>]) -> Option<crate::accel::FwdPrefixSearch> {
+        if byte_sets_raw.iter().all(|bs| bs.len() == 1) {
+            let needle: Vec<u8> = byte_sets_raw.iter().map(|bs| bs[0]).collect();
+            let lit = crate::simd::FwdLiteralSearch::new(&needle);
+            if crate::simd::BYTE_FREQ[lit.rare_byte() as usize] >= 100 {
+                return None;
+            }
+            return Some(crate::accel::FwdPrefixSearch::Literal(lit));
+        }
+
+        let mut freqs: Vec<(usize, u64)> = byte_sets_raw
+            .iter()
+            .enumerate()
+            .map(|(i, bytes)| {
+                let freq: u64 = bytes
+                    .iter()
+                    .map(|&b| crate::simd::BYTE_FREQ[b as usize] as u64)
+                    .sum();
+                (i, freq)
+            })
+            .filter(|&(_, f)| f > 0)
+            .collect();
+        if freqs.is_empty() {
+            return None;
+        }
+        freqs.sort_by_key(|&(_, f)| f);
+
+        if byte_sets_raw[freqs[0].0].len() > 16 {
+            return None;
+        }
+
+        let freq_order: Vec<usize> = freqs.iter().map(|&(i, _)| i).collect();
+        let all_sets: Vec<crate::accel::TSet> = byte_sets_raw
+            .iter()
+            .map(|bytes| crate::accel::TSet::from_bytes(bytes))
+            .collect();
+
+        Some(crate::accel::FwdPrefixSearch::Prefix(
+            crate::simd::FwdPrefixSearch::new(
+                byte_sets_raw.len(),
+                &freq_order,
+                byte_sets_raw,
+                all_sets,
+            ),
+        ))
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    fn build_prefix_search(_byte_sets_raw: &[Vec<u8>]) -> Option<crate::accel::FwdPrefixSearch> {
+        None
+    }
+
+    /// match rel from a nullable node.
+    pub fn node_rel(node: &NodeId, b: &RegexBuilder) -> u32 {
+        let nulls_id = b.get_nulls_id(*node);
+        if nulls_id.0 == 0 {
+            return 0;
+        }
+        let nulls = b.nulls_entry_vec(nulls_id.0);
+        for ns in &nulls {
+            if ns.mask.has(Nullability::CENTER) || ns.mask.has(Nullability::END) {
+                return ns.rel;
+            }
+        }
+        0
+    }
+
+    /// best match rel from packed extra.
+    pub fn counted_best(node: NodeId, b: &RegexBuilder) -> u32 {
+        (b.get_extra(node) >> 16) as u32
+    }
+
+    fn register(&mut self, node: NodeId, b: &RegexBuilder) -> u16 {
+        if let Some(&sid) = self.state_map.get(&node) {
+            return sid;
+        }
+        let sid = self.states.len() as u16;
+        // leftmost with body=BOT and best>0 -> match
+        let body = node.left(b);
+        let rel = if body == NodeId::BOT {
+            Self::counted_best(node, b)
+        } else {
+            0
+        };
+        if cfg!(feature = "debug-nulls") {
+            eprintln!(
+                "  [bounded] register state {} node={} rel={}",
+                sid,
+                b.pp(node),
+                rel,
+            );
+        }
+        self.states.push(node);
+        self.state_map.insert(node, sid);
+        self.match_rel.push(rel);
+        self.table
+            .resize(self.table.len() + (1usize << self.mt_log), DFA_MISSING);
+        sid
+    }
+
+    /// transition from state on minterm.
+    #[inline(always)]
+    pub fn transition(
+        &mut self,
+        b: &mut RegexBuilder,
+        state: u16,
+        mt_idx: usize,
+    ) -> Result<u16, Error> {
+        let delta = (state as usize) << self.mt_log | mt_idx;
+        let cached = self.table[delta];
+        if cached != DFA_MISSING {
+            return Ok(cached);
+        }
+        self.transition_slow(b, state, mt_idx)
+    }
+
+    fn derive_chain(b: &mut RegexBuilder, head: NodeId, mt: TSetId) -> Result<Vec<NodeId>, Error> {
+        let mut result = Vec::new();
+        let mut cur = head;
+        while cur.0 > NodeId::BOT.0 {
+            debug_assert_eq!(b.get_kind(cur), Kind::Counted);
+            let chain = cur.right(b);
+            let der = b.der(cur, Nullability::CENTER).map_err(Error::Algebra)?;
+            let next = transition_term(b, der, mt);
+            if next != NodeId::BOT {
+                result.push(next);
+            } else {
+                let best = Self::counted_best(next, b);
+                if best > 0 {
+                    result.push(next);
+                }
+            }
+            cur = chain;
+        }
+        Ok(result)
+    }
+
+    fn rebuild_chain(b: &mut RegexBuilder, candidates: &[NodeId]) -> NodeId {
+        let mut chain = NodeId::MISSING;
+        for &node in candidates.iter().rev() {
+            let body = node.left(b);
+            let packed = b.get_extra(node);
+            let next = b.mk_counted(body, chain, packed);
+            if next != NodeId::BOT {
+                chain = next;
+            }
+        }
+        chain
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn transition_slow(
+        &mut self,
+        b: &mut RegexBuilder,
+        state: u16,
+        mt_idx: usize,
+    ) -> Result<u16, Error> {
+        let head = self.states[state as usize];
+        let mt = self.minterms[mt_idx];
+
+        let mut candidates = Self::derive_chain(b, head, mt)?;
+
+        let spawn_der = b
+            .der(self.initial_node, Nullability::CENTER)
+            .map_err(Error::Algebra)?;
+        let spawn_next = transition_term(b, spawn_der, mt);
+        if spawn_next != NodeId::BOT && !candidates.contains(&spawn_next) {
+            candidates.push(spawn_next);
+        }
+
+        let new_head = Self::rebuild_chain(b, &candidates);
+        let next_sid = self.register(new_head, b);
+
+        if cfg!(feature = "debug-nulls") {
+            eprintln!(
+                "  [bdfa-slow] state={} mt={} head={} candidates=[{}] new_head={} -> sid={}",
+                state,
+                mt_idx,
+                b.pp(head),
+                candidates
+                    .iter()
+                    .map(|n| b.pp(*n))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                b.pp(new_head),
+                next_sid,
+            );
+        }
+
+        let delta = (state as usize) << self.mt_log | mt_idx;
+        self.table[delta] = next_sid;
+        Ok(next_sid)
+    }
 }

@@ -157,6 +157,7 @@ pub enum Kind {
     Lookbehind,
     Lookahead,
     Inter,
+    Counted,
 }
 
 #[derive(Eq, Hash, PartialEq, Clone)]
@@ -847,6 +848,13 @@ impl RegexBuilder {
                     self.get_nulls(pending_rel, mask, acc, la_tail);
                 }
             }
+            Kind::Counted => {
+                let packed = self.get_extra(node_id);
+                let best = (packed >> 16) as u32;
+                if best > 0 {
+                    acc.insert(NullState::new(mask, pending_rel + best));
+                }
+            }
         }
     }
 
@@ -855,6 +863,13 @@ impl RegexBuilder {
             .has(MetaFlags::CONTAINS_LOOKAROUND)
     }
 
+    /// whether node contains `^`, `$`, `\A`, `\z` anchors.
+    pub fn contains_anchors(&self, node_id: NodeId) -> bool {
+        self.get_meta_flags(node_id)
+            .has(MetaFlags::CONTAINS_ANCHORS)
+    }
+
+
     pub fn is_infinite(&self, node_id: NodeId) -> bool {
         self.get_meta_flags(node_id).has(MetaFlags::INFINITE_LENGTH)
     }
@@ -862,13 +877,20 @@ impl RegexBuilder {
     /// returns (min_length, max_length). max = u32::MAX means unbounded.
     pub fn get_min_max_length(&self, node_id: NodeId) -> (u32, u32) {
         if self.is_infinite(node_id) {
-            (self.get_min_length_only(node_id), u32::MAX)
+            if self.get_kind(node_id) == Kind::Inter {
+                self.get_bounded_length(node_id)
+            } else {
+                (self.get_min_length_only(node_id), u32::MAX)
+            }
         } else {
             self.get_bounded_length(node_id)
         }
     }
 
     fn get_bounded_length(&self, node_id: NodeId) -> (u32, u32) {
+        if node_id == NodeId::EPS {
+            return (0, 0);
+        }
         match self.get_kind(node_id) {
             Kind::End | Kind::Begin => (0, 0),
             Kind::Pred => (1, 1),
@@ -888,6 +910,10 @@ impl RegexBuilder {
                 (lmin.max(rmin), lmax.min(rmax))
             }
             Kind::Lookahead => {
+                let body = node_id.left(self);
+                if self.is_infinite(body) {
+                    return (0, u32::MAX);
+                }
                 let right = node_id.right(self);
                 if right.is_missing() {
                     (0, 0)
@@ -895,6 +921,7 @@ impl RegexBuilder {
                     self.get_min_max_length(right)
                 }
             }
+            Kind::Counted => (0, 0),
             Kind::Star | Kind::Lookbehind | Kind::Compl => (0, u32::MAX),
         }
     }
@@ -934,6 +961,7 @@ impl RegexBuilder {
                     self.get_fixed_length(right)
                 }
             }
+            Kind::Counted => Some(0),
             Kind::Star | Kind::Lookbehind | Kind::Compl => None,
         }
     }
@@ -952,7 +980,7 @@ impl RegexBuilder {
             Kind::Inter => self
                 .get_min_length_only(node_id.left(self))
                 .max(self.get_min_length_only(node_id.right(self))),
-            Kind::Star | Kind::Lookbehind | Kind::Lookahead => 0,
+            Kind::Star | Kind::Lookbehind | Kind::Lookahead | Kind::Counted => 0,
             Kind::Compl => {
                 if self.nullability(node_id.left(self)) == Nullability::NEVER {
                     0
@@ -1252,6 +1280,31 @@ impl RegexBuilder {
                     la
                 }
             }
+            Kind::Counted => {
+                let body = node_id.left(self);
+                let chain = node_id.right(self);
+                let packed = self.get_extra(node_id);
+                let step = (packed & 0xFFFF) as u16;
+                let best = (packed >> 16) as u16;
+
+                let mid_best = if self.is_nullable(body, mask) && step >= best {
+                    step
+                } else {
+                    best
+                };
+
+                let body_der = self.der(body, mask)?;
+                let new_step = step.saturating_add(1);
+                self.mk_unary(body_der, &mut |b, new_body| {
+                    let final_best = if b.is_nullable(new_body, mask) && new_step >= mid_best {
+                        new_step
+                    } else {
+                        mid_best
+                    };
+                    let packed = (final_best as u32) << 16 | new_step as u32;
+                    b.mk_counted(new_body, chain, packed)
+                })
+            }
             Kind::Begin | Kind::End => TRegexId::BOT,
             Kind::Pred => {
                 let psi = node_id.pred_tset(&self);
@@ -1308,14 +1361,20 @@ impl RegexBuilder {
             }
             Kind::Begin => {
                 let meta_id = self.mb.get_meta_id(Metadata {
-                    flags: MetaFlags::with_nullability(Nullability::BEGIN, MetaFlags::ZERO),
+                    flags: MetaFlags::with_nullability(
+                        Nullability::BEGIN,
+                        MetaFlags::CONTAINS_ANCHORS,
+                    ),
                     nulls: NullsId::BEGIN0,
                 });
                 self.init_metadata(node_id, meta_id);
             }
             Kind::End => {
                 let meta_id = self.mb.get_meta_id(Metadata {
-                    flags: MetaFlags::with_nullability(Nullability::END, MetaFlags::ZERO),
+                    flags: MetaFlags::with_nullability(
+                        Nullability::END,
+                        MetaFlags::CONTAINS_ANCHORS,
+                    ),
                     nulls: NullsId::END0,
                 });
                 self.init_metadata(node_id, meta_id);
@@ -1442,6 +1501,21 @@ impl RegexBuilder {
                 });
                 self.init_metadata(node_id, meta_id);
             }
+            Kind::Counted => {
+                let best = (inst.extra >> 16) as u32;
+                let (null, nulls) = if best > 0 {
+                    let mut ns = BTreeSet::new();
+                    ns.insert(NullState::new(Nullability::CENTER, best));
+                    (Nullability::CENTER, self.mb.nb.get_id(ns))
+                } else {
+                    (Nullability::NEVER, NullsId::EMPTY)
+                };
+                let meta_id = self.mb.get_meta_id(Metadata {
+                    flags: MetaFlags::with_nullability(null, MetaFlags::ZERO),
+                    nulls,
+                });
+                self.init_metadata(node_id, meta_id);
+            }
         }
 
         self.array.push(inst);
@@ -1459,7 +1533,6 @@ impl RegexBuilder {
                 let lhs = node_id.left(self);
                 let rhs = node_id.right(self);
                 if let Some(_) = lhs.is_pred_star(self) {
-                    // subsume the tail into the star if possible
                     if let Some(opttail) = rhs.is_opt_v(self) {
                         if let Some(true) = self.subsumes(lhs, opttail) {
                             // return self.override_as(node_id, lhs);
@@ -1469,7 +1542,6 @@ impl RegexBuilder {
                 }
             }
             Kind::Union => {
-                // if any branch of rhs structurally subsumes lhs, drop lhs
                 let lhs = node_id.left(self);
                 let rhs = node_id.right(self);
                 let mut subsumed = false;
@@ -1482,7 +1554,6 @@ impl RegexBuilder {
                 if subsumed {
                     return Some(rhs);
                 }
-                // if all branches of lhs are already branches of rhs, drop lhs
                 if lhs != rhs && self.union_branches_subset(lhs, rhs) {
                     return Some(rhs);
                 }
@@ -1495,11 +1566,9 @@ impl RegexBuilder {
 
     /// checks if every branch of `lhs` (as a union tree) appears in `rhs` (as a union tree).
     fn union_branches_subset(&self, lhs: NodeId, rhs: NodeId) -> bool {
-        // only worth checking if lhs is itself a union
         if self.get_kind(lhs) != Kind::Union {
             return false; // single branch already checked by nullable_subsumes
         }
-        // collect rhs branches
         let mut rhs_branches = Vec::new();
         let mut curr = rhs;
         while self.get_kind(curr) == Kind::Union {
@@ -1508,7 +1577,6 @@ impl RegexBuilder {
         }
         rhs_branches.push(curr);
 
-        // check all lhs branches are in rhs
         curr = lhs;
         while self.get_kind(curr) == Kind::Union {
             if !rhs_branches.contains(&self.get_left(curr)) {
@@ -1573,7 +1641,7 @@ impl RegexBuilder {
     }
 
     #[inline]
-    pub(crate) fn get_extra(&self, node_id: NodeId) -> u32 {
+    pub fn get_extra(&self, node_id: NodeId) -> u32 {
         self.array[node_id.0 as usize].extra
     }
 
@@ -1613,7 +1681,7 @@ impl RegexBuilder {
     }
     #[inline]
     pub(crate) fn get_lookahead_inner(&self, lookahead_node_id: NodeId) -> NodeId {
-        debug_assert!(self.get_kind(lookahead_node_id) == Kind::Lookahead);
+        debug_assert!(matches!(self.get_kind(lookahead_node_id), Kind::Lookahead | Kind::Counted));
         lookahead_node_id.left(self)
     }
     #[inline]
@@ -1624,8 +1692,8 @@ impl RegexBuilder {
     #[inline]
     pub(crate) fn get_lookahead_rel(&self, lookahead_node_id: NodeId) -> u32 {
         debug_assert!(
-            self.get_kind(lookahead_node_id) == Kind::Lookahead,
-            "not lookahead: {:?}",
+            matches!(self.get_kind(lookahead_node_id), Kind::Lookahead | Kind::Counted),
+            "not lookahead/counted: {:?}",
             self.pp(lookahead_node_id)
         );
         self.get_extra(lookahead_node_id)
@@ -1812,6 +1880,9 @@ impl RegexBuilder {
                 let rev_inner = self.reverse(inner_id)?;
                 self.mk_lookbehind(rev_inner, rev_tail)
             }
+            Kind::Counted => {
+                return Err(AlgebraError::UnsupportedPattern);
+            }
         };
         self.init_reversed(node_id, rw);
         Ok(rw)
@@ -1883,13 +1954,11 @@ impl RegexBuilder {
         futures
     }
 
-    // rewrites for 2 concats
     fn attempt_rw_concat_2(&mut self, head: NodeId, tail: NodeId) -> Option<NodeId> {
         if cfg!(feature = "norewrite") {
             return None;
         }
 
-        // important lookaround rewrites for normal form pt 1
         if self.get_kind(tail) == Kind::Lookbehind {
             let lbleft = self.mk_concat(head, self.get_lookbehind_prev(tail).missing_to_eps());
             return match self
@@ -1899,7 +1968,6 @@ impl RegexBuilder {
                 Err(_) => None,
             };
         }
-        // important lookaround rewrites for normal form pt 2
         if self.get_kind(head) == Kind::Lookahead {
             let la_body = self.get_lookahead_inner(head);
             let la_tail = self.get_lookahead_tail(head);
@@ -1941,7 +2009,6 @@ impl RegexBuilder {
         }
 
         if self.get_kind(tail) == Kind::Union {
-            // gather topstar to head
             if head == NodeId::TS {
                 let mut should_distribute_top = false;
                 self.iter_unions(tail, |v| {
@@ -1965,7 +2032,6 @@ impl RegexBuilder {
         }
 
         if self.get_kind(head) == Kind::Union {
-            // gather topstar to head
             if head == NodeId::TS {
                 let mut should_distribute_top = false;
                 self.iter_unions(head, |v| {
@@ -2007,7 +2073,6 @@ impl RegexBuilder {
         None
     }
 
-    // useful rewrites for 2 unions
     fn attempt_rw_union_2(&mut self, left: NodeId, right: NodeId) -> Option<NodeId> {
         use Kind::*;
 
@@ -2601,7 +2666,7 @@ impl RegexBuilder {
     }
 
     // rel max = carries no nullability, can potentially rw to intersection
-    pub(crate) fn mk_lookahead_internal(
+    pub fn mk_lookahead_internal(
         &mut self,
         la_body: NodeId,
         la_tail: NodeId,
@@ -2719,6 +2784,40 @@ impl RegexBuilder {
         self.get_node_id(key)
     }
 
+    pub fn mk_counted(&mut self, body: NodeId, chain: NodeId, packed: u32) -> NodeId {
+        let has_match = (packed >> 16) > 0;
+        if body == NodeId::BOT && chain == NodeId::MISSING && !has_match {
+            return NodeId::BOT;
+        }
+        let chain = self.prune_counted_chain(body, chain);
+        let key = NodeKey {
+            kind: Kind::Counted,
+            left: body,
+            right: chain,
+            extra: packed,
+        };
+        if let Some(id) = self.key_is_created(&key) {
+            return *id;
+        }
+        self.get_node_id(key)
+    }
+
+    fn prune_counted_chain(&mut self, body: NodeId, chain: NodeId) -> NodeId {
+        if chain == NodeId::MISSING || body == NodeId::BOT {
+            return chain;
+        }
+        let chain_body = chain.left(self);
+        if chain_body == NodeId::BOT {
+            return chain; // pending match, keep
+        }
+        let not_begins = self.mk_not_begins_with(body);
+        if self.mk_inter(chain_body, not_begins) == NodeId::BOT {
+            self.prune_counted_chain(body, chain.right(self))
+        } else {
+            chain
+        }
+    }
+
     pub fn mk_neg_lookahead(&mut self, body: NodeId, rel: u32) -> NodeId {
         match self.get_node(body).kind {
             Kind::Pred => {
@@ -2790,7 +2889,6 @@ impl RegexBuilder {
         }
 
         match (self.get_kind(left), self.get_kind(right)) {
-            // always move union to the right
             (Kind::Union, _) => {
                 self.iter_unions_b(left, &mut |b, v| {
                     b.temp_vec.push(v);
@@ -2942,6 +3040,7 @@ impl RegexBuilder {
             Kind::Compl => self.nullability_emptystring(node_id.left(self)).not(),
             Kind::Lookbehind => self.nullability_emptystring(node_id.left(self)),
             Kind::Lookahead => self.nullability_emptystring(node_id.left(self)),
+            Kind::Counted => self.nullability_emptystring(node_id.left(self)),
         }
     }
 
@@ -3175,6 +3274,15 @@ impl RegexBuilder {
                     write!(s, "』")
                 }
             }
+            Kind::Counted => {
+                let body = node_id.left(self);
+                let packed = self.get_extra(node_id);
+                let step = packed & 0xFFFF;
+                let best = packed >> 16;
+                write!(s, "#(")?;
+                self.ppw(s, body)?;
+                write!(s, ")s{}b{}", step, best)
+            }
         }
     }
 
@@ -3182,8 +3290,7 @@ impl RegexBuilder {
         self.mk_concat(node, NodeId::TS)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn mk_not_begins_with(&mut self, node: NodeId) -> NodeId {
+    pub fn mk_not_begins_with(&mut self, node: NodeId) -> NodeId {
         let node_ts = self.mk_concat(node, NodeId::TS);
         self.mk_compl(node_ts)
     }
@@ -3432,6 +3539,7 @@ impl RegexBuilder {
                 let rw = self.mk_inter(elim_l, elim_r);
                 Some(rw)
             }
+            Kind::Counted => None,
         }
     }
 
