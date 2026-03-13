@@ -206,6 +206,58 @@ impl RevSearchBytes {
         unsafe { self.find_rev_avx2(haystack) }
     }
 
+    pub fn find_fwd(&self, haystack: &[u8]) -> Option<usize> {
+        unsafe { self.find_fwd_avx2(haystack) }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn find_fwd_avx2(&self, haystack: &[u8]) -> Option<usize> {
+        let len = haystack.len();
+        if len == 0 {
+            return None;
+        }
+        let ptr = haystack.as_ptr();
+        let v0 = _mm256_set1_epi8(self.bytes[0] as i8);
+        let n = self.bytes.len();
+
+        let mut pos = 0;
+        while pos + 32 <= len {
+            let chunk = _mm256_loadu_si256(ptr.add(pos) as *const __m256i);
+            let mut mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v0)) as u32;
+            if n >= 2 {
+                let v1 = _mm256_set1_epi8(self.bytes[1] as i8);
+                mask |= _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v1)) as u32;
+            }
+            if n >= 3 {
+                let v2 = _mm256_set1_epi8(self.bytes[2] as i8);
+                mask |= _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v2)) as u32;
+            }
+            if mask != 0 {
+                return Some(pos + mask.trailing_zeros() as usize);
+            }
+            pos += 32;
+        }
+        if pos < len {
+            let mut buf = [0u8; 32];
+            buf[..len - pos].copy_from_slice(&haystack[pos..]);
+            let chunk = _mm256_loadu_si256(buf.as_ptr() as *const __m256i);
+            let mut mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v0)) as u32;
+            if n >= 2 {
+                let v1 = _mm256_set1_epi8(self.bytes[1] as i8);
+                mask |= _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v1)) as u32;
+            }
+            if n >= 3 {
+                let v2 = _mm256_set1_epi8(self.bytes[2] as i8);
+                mask |= _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v2)) as u32;
+            }
+            mask &= (1u32 << (len - pos)) - 1;
+            if mask != 0 {
+                return Some(pos + mask.trailing_zeros() as usize);
+            }
+        }
+        None
+    }
+
     #[target_feature(enable = "avx2")]
     unsafe fn find_rev_avx2(&self, haystack: &[u8]) -> Option<usize> {
         let len = haystack.len();
@@ -1071,6 +1123,75 @@ impl RevSearchRanges {
         unsafe { self.find_rev_avx2(haystack) }
     }
 
+    pub fn find_fwd(&self, haystack: &[u8]) -> Option<usize> {
+        unsafe { self.find_fwd_avx2(haystack) }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn find_fwd_avx2(&self, haystack: &[u8]) -> Option<usize> {
+        let len = haystack.len();
+        if len == 0 {
+            return None;
+        }
+        let ptr = haystack.as_ptr();
+        let n = self.ranges.len();
+        let lo0 = _mm256_set1_epi8(self.ranges[0].0 as i8);
+        let hi0 = _mm256_set1_epi8(self.ranges[0].1 as i8);
+
+        let mut pos = 0;
+        while pos + 32 <= len {
+            let chunk = _mm256_loadu_si256(ptr.add(pos) as *const __m256i);
+            let ge0 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo0), chunk);
+            let le0 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi0), chunk);
+            let mut mask = _mm256_movemask_epi8(_mm256_and_si256(ge0, le0)) as u32;
+            if n >= 2 {
+                let lo1 = _mm256_set1_epi8(self.ranges[1].0 as i8);
+                let hi1 = _mm256_set1_epi8(self.ranges[1].1 as i8);
+                let ge1 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo1), chunk);
+                let le1 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi1), chunk);
+                mask |= _mm256_movemask_epi8(_mm256_and_si256(ge1, le1)) as u32;
+            }
+            if n >= 3 {
+                let lo2 = _mm256_set1_epi8(self.ranges[2].0 as i8);
+                let hi2 = _mm256_set1_epi8(self.ranges[2].1 as i8);
+                let ge2 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo2), chunk);
+                let le2 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi2), chunk);
+                mask |= _mm256_movemask_epi8(_mm256_and_si256(ge2, le2)) as u32;
+            }
+            if mask != 0 {
+                return Some(pos + mask.trailing_zeros() as usize);
+            }
+            pos += 32;
+        }
+        if pos < len {
+            let mut buf = [0u8; 32];
+            buf[..len - pos].copy_from_slice(&haystack[pos..]);
+            let chunk = _mm256_loadu_si256(buf.as_ptr() as *const __m256i);
+            let ge0 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo0), chunk);
+            let le0 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi0), chunk);
+            let mut mask = _mm256_movemask_epi8(_mm256_and_si256(ge0, le0)) as u32;
+            if n >= 2 {
+                let lo1 = _mm256_set1_epi8(self.ranges[1].0 as i8);
+                let hi1 = _mm256_set1_epi8(self.ranges[1].1 as i8);
+                let ge1 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo1), chunk);
+                let le1 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi1), chunk);
+                mask |= _mm256_movemask_epi8(_mm256_and_si256(ge1, le1)) as u32;
+            }
+            if n >= 3 {
+                let lo2 = _mm256_set1_epi8(self.ranges[2].0 as i8);
+                let hi2 = _mm256_set1_epi8(self.ranges[2].1 as i8);
+                let ge2 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo2), chunk);
+                let le2 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi2), chunk);
+                mask |= _mm256_movemask_epi8(_mm256_and_si256(ge2, le2)) as u32;
+            }
+            mask &= (1u32 << (len - pos)) - 1;
+            if mask != 0 {
+                return Some(pos + mask.trailing_zeros() as usize);
+            }
+        }
+        None
+    }
+
     #[target_feature(enable = "avx2")]
     unsafe fn find_rev_avx2(&self, haystack: &[u8]) -> Option<usize> {
         let len = haystack.len();
@@ -1158,6 +1279,10 @@ impl RevSearchBytes {
     pub fn find_rev(&self, _haystack: &[u8]) -> Option<usize> {
         unreachable!()
     }
+
+    pub fn find_fwd(&self, _haystack: &[u8]) -> Option<usize> {
+        unreachable!()
+    }
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -1224,6 +1349,10 @@ impl RevSearchRanges {
     }
 
     pub fn find_rev(&self, _haystack: &[u8]) -> Option<usize> {
+        unreachable!()
+    }
+
+    pub fn find_fwd(&self, _haystack: &[u8]) -> Option<usize> {
         unreachable!()
     }
 }

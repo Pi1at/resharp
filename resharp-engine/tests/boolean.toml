@@ -170,8 +170,6 @@ name = "lookbehind_complement"
 pattern = "(?<=__).*&~(.*and.*)"
 input = "__ abc and def"
 matches = [[2, 9], [9, 14], [14, 14]]
-ignore = true
-reason = "lookbehind+complement: wrong match granularity"
 
 [[test]]
 name = "lookbehind_lookahead_intersection"

@@ -17,6 +17,14 @@ impl MintermSearchValue {
             MintermSearchValue::Range(s) => s.find_rev(haystack),
         }
     }
+
+    #[inline(always)]
+    pub fn find_fwd(&self, haystack: &[u8]) -> Option<usize> {
+        match self {
+            MintermSearchValue::Exact(s) => s.find_fwd(haystack),
+            MintermSearchValue::Range(s) => s.find_fwd(haystack),
+        }
+    }
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -25,6 +33,10 @@ pub enum MintermSearchValue {}
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 impl MintermSearchValue {
     pub fn find_rev(&self, _haystack: &[u8]) -> Option<usize> {
+        match *self {}
+    }
+
+    pub fn find_fwd(&self, _haystack: &[u8]) -> Option<usize> {
         match *self {}
     }
 }

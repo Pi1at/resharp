@@ -374,6 +374,16 @@ fn bench_readme(c: &mut Criterion) {
     }
 }
 
+fn bench_dotstar_eq_redos(c: &mut Criterion) {
+    let haystack = load_haystack("cloud-flare-redos.txt");
+    let input = haystack.as_bytes();
+
+    let mut group = c.benchmark_group("dotstar-eq-redos");
+    group.throughput(Throughput::Bytes(input.len() as u64));
+    bench_three!(group, ".*=.*", input);
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().without_plots();

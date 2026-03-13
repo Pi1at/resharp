@@ -1018,6 +1018,21 @@ impl LazyDFA {
                 num_mt: self.num_minterms,
             };
 
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            let (state_out, new_pos, new_max, cache_miss) = if self.can_skip() {
+                scan_fwd_skip(
+                    &tables,
+                    &self.skip_ids,
+                    &self.skip_searchers,
+                    curr,
+                    pos,
+                    end,
+                    max_end,
+                )
+            } else {
+                scan_fwd_noskip(&tables, curr, pos, end, max_end)
+            };
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             let (state_out, new_pos, new_max, cache_miss) =
                 scan_fwd_noskip(&tables, curr, pos, end, max_end);
             max_end = new_max;
@@ -1032,6 +1047,9 @@ impl LazyDFA {
             if curr <= DFA_DEAD as u32 {
                 break;
             }
+
+            self.precompile_state(b, curr as u16).ok();
+            self.try_build_skip(curr as usize);
 
             let mask = if pos >= end {
                 Nullability::END
@@ -1146,6 +1164,53 @@ impl LazyDFA {
         }
 
         Ok(())
+    }
+
+    pub fn compute_fwd_skip(&mut self, b: &mut RegexBuilder) {
+        if !crate::simd::has_simd() {
+            return;
+        }
+        // precompile reachable states from initial via center transitions
+        use std::collections::VecDeque;
+        let mut todo: VecDeque<u16> = VecDeque::new();
+        let mut visited = HashSet::new();
+        let ini = self.initial;
+        if ini > DFA_DEAD {
+            todo.push_back(ini);
+        }
+        let limit = 64;
+        while let Some(sid) = todo.pop_front() {
+            if !visited.insert(sid) || visited.len() > limit {
+                continue;
+            }
+            if self.precompile_state(b, sid).is_err() {
+                break;
+            }
+            let num_mt = self.minterms.len();
+            for mt_idx in 0..num_mt {
+                let delta = self.dfa_delta(sid, mt_idx as u32);
+                if delta < self.center_table.len() {
+                    let next = self.center_table[delta];
+                    if next > DFA_DEAD && !visited.contains(&next) {
+                        todo.push_back(next);
+                    }
+                }
+            }
+        }
+        self.sync_effects(b);
+        // build skip: non-nullable first to seed can_skip(), then nullable
+        let states: Vec<u16> = visited.iter().copied().collect();
+        for &sid in &states {
+            let s = sid as usize;
+            let is_nullable = s < self.effects_id.len() && self.effects_id[s] != 0;
+            if !is_nullable {
+                self.try_build_skip(s);
+            }
+        }
+        for &sid in &states {
+            let s = sid as usize;
+            self.try_build_skip(s);
+        }
     }
 
     pub(crate) fn can_skip(&self) -> bool {
@@ -1423,7 +1488,7 @@ impl LazyDFA {
     }
 }
 
-fn has_any_null(
+pub(crate) fn has_any_null(
     effects_id: &[u16],
     effects: &[Vec<NullState>],
     state: u32,
@@ -1789,6 +1854,122 @@ fn scan_fwd_noskip(
             max_end = max_end.max(pos);
         } else {
             max_end = scan_fwd_complex(t.effects, prev_eid, pos, Nullability::END, max_end);
+        }
+    }
+    (curr, pos, max_end, false)
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn scan_fwd_skip(
+    t: &ScanTables,
+    skip_ids: &[u8],
+    skip_searchers: &[MintermSearchValue],
+    mut curr: u32,
+    mut pos: usize,
+    end: usize,
+    mut max_end: usize,
+) -> (u32, usize, usize, bool) {
+    let center_table = t.center_table;
+    let effects_id = t.effects_id;
+    let effects = t.effects;
+    let data = t.data;
+    let minterms_lookup = t.minterms_lookup;
+    let num_mt = t.num_mt;
+
+    while pos < end {
+        let sid = skip_ids[curr as usize];
+        if sid != 0 {
+            let searcher = &skip_searchers[sid as usize - 1];
+            let haystack = unsafe { std::slice::from_raw_parts(data.add(pos), end - pos) };
+            match searcher.find_fwd(haystack) {
+                Some(offset) => {
+                    // nullable self-loop: only need max position for max_end
+                    unsafe {
+                        let eid = *effects_id.add(curr as usize) as u32;
+                        if eid != 0 && offset > 0 {
+                            let skip_end_pos = pos + offset;
+                            if eid == 1 {
+                                max_end = max_end.max(skip_end_pos);
+                            } else {
+                                max_end = scan_fwd_complex(
+                                    effects,
+                                    eid,
+                                    skip_end_pos,
+                                    Nullability::CENTER,
+                                    max_end,
+                                );
+                            }
+                        }
+                    }
+                    pos += offset;
+                }
+                None => {
+                    // no non-self-loop byte: entire rest is self-loop
+                    unsafe {
+                        let eid = *effects_id.add(curr as usize) as u32;
+                        if eid != 0 {
+                            if eid == 1 {
+                                max_end = max_end.max(end);
+                            } else {
+                                max_end =
+                                    scan_fwd_complex(effects, eid, end, Nullability::END, max_end);
+                            }
+                        }
+                    }
+                    return (curr, end, max_end, false);
+                }
+            }
+        }
+
+        // inner noskip loop until we hit a skippable state or cache miss
+        let mut prev_eid: u32 = 0;
+        while pos < end {
+            unsafe {
+                let mt = *minterms_lookup.add(*data.add(pos) as usize) as u32;
+                if prev_eid != 0 {
+                    if prev_eid == 1 {
+                        max_end = max_end.max(pos);
+                    } else {
+                        max_end =
+                            scan_fwd_complex(effects, prev_eid, pos, Nullability::CENTER, max_end);
+                    }
+                }
+                let delta = (curr * num_mt + mt) as usize;
+                let next = *center_table.add(delta);
+                if next == 0 {
+                    return (curr, pos, max_end, true);
+                }
+                if next == DFA_DEAD {
+                    return (DFA_DEAD as u32, pos, max_end, false);
+                }
+                curr = next as u32;
+                prev_eid = *effects_id.add(curr as usize) as u32;
+            }
+            pos += 1;
+            if skip_ids[curr as usize] != 0 {
+                // flush deferred prev_eid before returning to skip loop
+                if prev_eid != 0 {
+                    let mask = if pos >= end {
+                        Nullability::END
+                    } else {
+                        Nullability::CENTER
+                    };
+                    if prev_eid == 1 {
+                        max_end = max_end.max(pos);
+                    } else {
+                        max_end = scan_fwd_complex(effects, prev_eid, pos, mask, max_end);
+                    }
+                    prev_eid = 0;
+                }
+                break;
+            }
+        }
+        if pos >= end && prev_eid != 0 {
+            if prev_eid == 1 {
+                max_end = max_end.max(pos);
+            } else {
+                max_end = scan_fwd_complex(effects, prev_eid, pos, Nullability::END, max_end);
+            }
         }
     }
     (curr, pos, max_end, false)

@@ -112,6 +112,7 @@ pub struct Regex {
     #[allow(dead_code)]
     max_length: Option<u32>,
     empty_nullable: bool,
+    fwd_end_nullable: bool,
 }
 
 impl Regex {
@@ -139,6 +140,7 @@ impl Regex {
             .has(Nullability::EMPTYSTRING);
 
         let fwd_start = b.strip_lb(node)?;
+        let fwd_end_nullable = b.nullability(fwd_start).has(Nullability::END);
         let rev_start = b.reverse(node)?;
         let ts_rev_start = b.mk_concat(NodeId::TS, rev_start);
 
@@ -173,6 +175,10 @@ impl Regex {
 
         rev.compute_skip(&mut b, rev_start)?;
 
+        if fwd_prefix_stripped {
+            fwd.compute_fwd_skip(&mut b);
+        }
+
         Ok(Regex {
             inner: Mutex::new(RegexInner {
                 b,
@@ -185,6 +191,7 @@ impl Regex {
             fixed_length,
             max_length,
             empty_nullable,
+            fwd_end_nullable,
         })
     }
 
@@ -249,6 +256,17 @@ impl Regex {
     }
 
     fn find_all_dfa(&self, input: &[u8]) -> Result<Vec<Match>, Error> {
+        if self.fwd_end_nullable {
+            self.find_all_dfa_inner::<true>(input)
+        } else {
+            self.find_all_dfa_inner::<false>(input)
+        }
+    }
+
+    fn find_all_dfa_inner<const FWD_NULL: bool>(
+        &self,
+        input: &[u8],
+    ) -> Result<Vec<Match>, Error> {
         let inner = &mut *self.inner.lock().unwrap();
 
         let rev_initial_nullable = inner.rev.effects_id[inner.rev.initial as usize] != 0;
@@ -280,6 +298,16 @@ impl Regex {
             inner
                 .fwd
                 .scan_fwd_all(&mut inner.b, &inner.nulls_buf, input, &mut matches)?;
+        }
+
+        if FWD_NULL
+            && inner.nulls_buf.first() == Some(&input.len())
+            && matches.last().map_or(true, |m| m.end <= input.len())
+        {
+            matches.push(Match {
+                start: input.len(),
+                end: input.len(),
+            });
         }
 
         Ok(matches)
