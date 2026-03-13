@@ -138,6 +138,11 @@ fn errors() {
 }
 
 #[test]
+fn date_pattern() {
+    run_file("date_pattern.toml");
+}
+
+#[test]
 fn edge_cases() {
     run_file("edge_cases.toml");
 }

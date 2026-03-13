@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::fmt::Debug;
 
 #[derive(Clone, Copy, PartialEq, Hash, Eq, PartialOrd, Ord)]
@@ -113,17 +113,17 @@ struct Key {
 }
 
 pub struct NullsBuilder {
-    cache: HashMap<Nulls, NullsId>,
-    created: HashMap<Key, NullsId>,
+    cache: FxHashMap<Nulls, NullsId>,
+    created: FxHashMap<Key, NullsId>,
     pub array: Vec<Nulls>,
 }
 
 impl NullsBuilder {
     pub fn new() -> NullsBuilder {
         let mut inst = Self {
-            cache: HashMap::new(),
+            cache: FxHashMap::default(),
             array: Vec::new(),
-            created: HashMap::new(),
+            created: FxHashMap::default(),
         };
         let _ = inst.init(BTreeSet::new());
         let _ = inst.init1(NullState::new0(Nullability::ALWAYS));

@@ -12,6 +12,9 @@ categories = ["text-processing"]
 documentation = "https://docs.rs/resharp"
 readme = "../README.md"
 
+[lib]
+doctest = false
+
 [features]
 debug-nulls = []
 
@@ -22,6 +25,7 @@ resharp-parser = { version = "0.3.0", path = "../resharp-parser" }
 [dev-dependencies]
 resharp-algebra = { version = "0.3.0", path = "../resharp-algebra" }
 resharp-parser = { version = "0.3.0", path = "../resharp-parser" }
+regex-syntax = "0.8.5"
 toml = "0.8"
 criterion = "0.5"
 regex = "1"

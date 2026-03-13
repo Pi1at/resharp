@@ -11,6 +11,10 @@ keywords = ["regex", "parser"]
 categories = ["parsing"]
 readme = "../README.md"
 
+[lib]
+doctest = false
+test = false
+
 [dependencies]
 regex-syntax = "0.8.5"
 resharp-algebra = { version = "0.3.0", path = "../resharp-algebra" }

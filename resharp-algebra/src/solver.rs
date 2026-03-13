@@ -120,17 +120,18 @@ impl TSetId {
     pub const FULL: TSetId = TSetId(1);
 }
 
-use std::collections::{BTreeMap, BTreeSet};
+use rustc_hash::FxHashMap;
+use std::collections::BTreeSet;
 
 pub struct Solver {
-    cache: BTreeMap<TSet, TSetId>,
+    cache: FxHashMap<TSet, TSetId>,
     pub array: Vec<TSet>,
 }
 
 impl Solver {
     pub fn new() -> Solver {
         let mut inst = Self {
-            cache: BTreeMap::new(),
+            cache: FxHashMap::default(),
             array: Vec::new(),
         };
         let _ = inst.init(Solver::empty()); // 0

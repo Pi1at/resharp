@@ -22,7 +22,7 @@ You combine all of these with `&` to get more complex patterns.
 - Lazy quantifiers: `*?`, `+?`, `??`, `{n,m}?` produce a parse error.
 - Backreferences: `\1`, `\2`, etc.
 - Nested lookarounds: `(?=(?<=a)b)` or `(?<=(?=a)b)c`
-- Unions of lookbehinds: `(?<=abc)de|(?<=def)gh`
+- Alternatives of lookbehinds: `(?<=abc)de|(?<=def)gh`
 
 ## Extensions
 
@@ -68,10 +68,22 @@ Matches everything the inner pattern does **not** match. Parentheses are require
 F.*&~(.*Finn)                       starts with F, doesn't end with "Finn"
 ~(_*\d\d_*)&[a-zA-Z\d]{8,}         8+ alphanumeric, no consecutive digits
 ~(_*\n\n_*)&_*keyword_*&\S_*\S     paragraph containing "keyword"
-_*&\p{utf8}                         any byte string that is valid UTF-8
 ```
 
-`\p{utf8}` constrains matches to valid UTF-8 byte sequences - just another intersection constraint, no special logic needed. More on this in the [blog post](https://iev.ee/blog/symbolic-derivatives-and-the-rust-rewrite-of-resharp/).
+### Complement and UTF-8
+
+RE# operates on raw bytes. Complement inverts at the byte level, so `~(pattern)` can match arbitrary byte sequences -- including invalid UTF-8. Intersect with `\p{utf8}` to stay in valid UTF-8 space:
+
+```
+~(_*abc_*)&\p{utf8}                 does not contain "abc", valid UTF-8 only
+~(_*\d\d_*)&\p{utf8}               no consecutive digits, valid UTF-8 only
+```
+
+Without `&\p{utf8}`, a complement pattern will match any byte string that doesn't match the inner pattern, including byte sequences that aren't valid UTF-8. This matters when your input is guaranteed UTF-8 and you want the engine to respect that.
+
+`\p{utf8}` matches `(ascii | [C0-DF][80-BF] | [E0-EF][80-BF]{2} | [F0-F7][80-BF]{3})*` -- the set of all valid UTF-8 byte strings. There's no special UTF-8 mode; the constraint falls out of intersection over byte-level automata. See the [blog post](https://iev.ee/blog/symbolic-derivatives-and-the-rust-rewrite-of-resharp/) for details.
+
+> `\W`, `\D`, `\S` already intersect with valid UTF-8 internally, so they never match invalid byte sequences. The `&\p{utf8}` constraint is only needed when using `~(...)` complement directly.
 
 ## Standard syntax
 
@@ -82,12 +94,12 @@ _*&\p{utf8}                         any byte string that is valid UTF-8
 | `[abc]` | any of a, b, c |
 | `[^abc]` | any character except a, b, c |
 | `[a-z]` | range: a through z |
-| `\d` | digit (unicode, hundreds of digits; `[0-9]` for ascii (10 digits)) |
+| `\d` | digit (unicode; `[0-9]` for ascii) |
 | `\D` | non-digit |
-| `\w` | word character (unicode, 10000+ chars) |
+| `\w` | word character (unicode; `[A-Za-z0-9_]` for ascii) |
 | `\W` | non-word character |
-| `\s` | whitespace, `[\t\r\n ]` |
-| `\S` | non-whitespace, `[^\t\r\n ]` |
+| `\s` | whitespace (unicode; `[\t\n\v\f\r ]` for ascii) |
+| `\S` | non-whitespace |
 | `.` | any character except `\n` |
 
 ### Quantifiers
@@ -109,7 +121,7 @@ _*&\p{utf8}                         any byte string that is valid UTF-8
 | `$` | end of line |
 | `\A` | start of string |
 | `\z` | end of string |
-| `\b` | word boundary |
+| `\b` | word boundary (unicode, see below) |
 
 ### Lookarounds
 
@@ -145,3 +157,40 @@ Flags apply from the point they appear until the end of the enclosing group.
 ## Match semantics
 
 Matches are **leftmost-longest**. This differs from most regex engines which use leftmost-first (greedy or lazy). Lazy quantifiers (`*?`, `+?`, `??`, `{n,m}?`) are not supported and will produce a parse error.
+
+## Unicode
+
+`\w`, `\d`, `\s` and `\b` are Unicode-aware by default, but scoped to 2-byte UTF-8 sequences (U+0000..U+07FF): ASCII, Latin Extended, Greek, Cyrillic, Hebrew, Arabic, and other scripts through NKo. Full Unicode `\w` is ~140,000 codepoints, but in practice `\w` is often used as shorthand for "non-whitespace token character" where `\S` would be more precise -- and **vastly cheaper**, since `\S` is the complement of just 6 whitespace codepoints. RE# defaults to 2-byte coverage (~1,600 codepoints) to keep automaton size down. `\b` uses this same 2-byte `\w` definition -- characters outside that range are treated as non-word for boundary purposes.
+
+Scripts encoded as 3+ byte UTF-8 (U+0800+) -- Devanagari, Thai, CJK, etc. -- are not included in `\w`, `\d`, `\s`. For these, use `\p{Class}` which covers the full Unicode range:
+
+| Shorthand | Covers | Full-range alternative |
+|-----------|--------|----------------------|
+| `\w` | word chars up to U+07FF | `\p{Letter}` \| `\p{Number}` \| `_` |
+| `\d` | digits up to U+07FF | `\p{Number}` |
+| `\s` | whitespace up to U+07FF | `\p{White_Space}` |
+| `\W` | non-word (UTF-8 safe) | |
+| `\D` | non-digit (UTF-8 safe) | |
+| `\S` | non-whitespace (UTF-8 safe) | |
+
+`\p{Class}` expands to the full Unicode range via `regex_syntax`, with no 2-byte limit. Any [Unicode general category or script name](https://www.unicode.org/reports/tr44/#General_Category_Values) works:
+
+```
+\p{Letter}           all Unicode letters (L)
+\p{Number}           all Unicode numbers (N)
+\p{White_Space}      all Unicode whitespace
+\p{Devanagari}       Devanagari script (U+0900..U+097F)
+\p{Greek}            Greek script
+\p{Han}              CJK Unified Ideographs
+\p{Uppercase}        uppercase letters
+```
+
+You can also use explicit ranges: `[\u{0900}-\u{097F}]`.
+
+### Special properties
+
+| Pattern | Description |
+|---------|-------------|
+| `\p{utf8}` | valid UTF-8 byte strings (for constraining complement) |
+| `\p{ascii}` | ASCII bytes (0x00..0x7F) |
+| `\p{hex}` | hexadecimal digits (`[0-9a-fA-F]`) |

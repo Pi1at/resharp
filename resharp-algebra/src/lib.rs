@@ -5,8 +5,11 @@
 
 #![warn(dead_code)]
 
+pub mod unicode_classes;
+pub use unicode_classes::UnicodeClassCache;
 use solver::{Solver, TSetId};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use rustc_hash::FxHashMap;
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt::Debug;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -170,7 +173,7 @@ struct MetadataBuilder {
     num_created: u32,
     solver: Solver,
     nb: NullsBuilder,
-    index: HashMap<Metadata, MetadataId>,
+    index: FxHashMap<Metadata, MetadataId>,
     pub array: Vec<Metadata>,
 }
 
@@ -191,7 +194,7 @@ impl MetadataBuilder {
             nulls: NullsId::EMPTY,
         });
         Self {
-            index: HashMap::new(),
+            index: FxHashMap::default(),
             array: arr,
             solver: Solver::new(),
             num_created: 0,
@@ -316,19 +319,22 @@ pub struct RegexBuilder {
     mb: MetadataBuilder,
     temp_vec: Vec<NodeId>,
     num_created: u32,
-    index: HashMap<NodeKey, NodeId>,
+    index: FxHashMap<NodeKey, NodeId>,
     array: Vec<NodeKey>,
     metadata: Vec<MetadataId>,
     reversed: Vec<NodeId>,
-    cache_empty: HashMap<NodeId, NodeFlags>,
-    tr_cache: HashMap<TRegex<TSetId>, TRegexId>,
+    cache_empty: FxHashMap<NodeId, NodeFlags>,
+    tr_cache: FxHashMap<TRegex<TSetId>, TRegexId>,
     tr_array: Vec<TRegex<TSetId>>,
     tr_der_center: Vec<TRegexId>,
     tr_der_begin: Vec<TRegexId>,
     flags: BuilderFlags,
     /// maximum lookahead context distance before returning `AnchorLimit`.
     pub lookahead_context_max: u32,
+    mk_binary_memo: FxHashMap<(TRegexId, TRegexId), TRegexId>,
+    clean_cache: FxHashMap<(TSetId, TRegexId), TRegexId>,
 }
+
 
 macro_rules! iter_inter {
     ($compiler:ident, $start:ident, $expression:expr) => {
@@ -526,10 +532,10 @@ impl RegexBuilder {
         let mut inst = Self {
             mb: MetadataBuilder::new(),
             array: Vec::new(),
-            index: HashMap::new(),
-            cache_empty: HashMap::new(),
+            index: FxHashMap::default(),
+            cache_empty: FxHashMap::default(),
             tr_array: Vec::new(),
-            tr_cache: HashMap::new(),
+            tr_cache: FxHashMap::default(),
             flags: BuilderFlags::ZERO,
             lookahead_context_max: 800,
             num_created: 0,
@@ -538,6 +544,8 @@ impl RegexBuilder {
             tr_der_center: Vec::new(),
             tr_der_begin: Vec::new(),
             temp_vec: Vec::new(),
+            mk_binary_memo: FxHashMap::default(),
+            clean_cache: FxHashMap::default(),
         };
         inst.array.push(NodeKey::default());
         inst.mk_pred(TSetId::EMPTY);
@@ -611,9 +619,15 @@ impl RegexBuilder {
         if self.solver().is_empty_id(cond) {
             return _else;
         }
-        let _clean_then = self.clean(cond, _then);
+        let _clean_then = match self.tr_array[_then.0 as usize] {
+            TRegex::Leaf(_) => _then,
+            _ => self.clean(cond, _then),
+        };
         let notcond = self.solver().not_id(cond);
-        let _clean_else = self.clean(notcond, _else);
+        let _clean_else = match self.tr_array[_else.0 as usize] {
+            TRegex::Leaf(_) => _else,
+            _ => self.clean(notcond, _else),
+        };
 
         if _clean_then == _clean_else {
             return _clean_then;
@@ -649,29 +663,30 @@ impl RegexBuilder {
     }
 
     fn clean(&mut self, beta: TSetId, tterm: TRegexId) -> TRegexId {
-        match *self.get_tregex(tterm) {
-            TRegex::Leaf(_) => return tterm,
+        if let Some(&cached) = self.clean_cache.get(&(beta, tterm)) {
+            return cached;
+        }
+        let result = match *self.get_tregex(tterm) {
+            TRegex::Leaf(_) => tterm,
             TRegex::ITE(alpha, _then_id, _else_id) => {
                 let notalpha = self.mb.solver.not_id(alpha);
                 if self.mb.solver.unsat_id(beta, alpha) {
-                    let ec = self.mb.solver.and_id(beta, notalpha);
-                    let new_else = self.clean(ec, _else_id);
-                    return new_else;
-                }
-                if self.unsat(beta, notalpha) {
+                    // beta ⊆ ¬alpha, so beta ∧ ¬alpha = beta
+                    self.clean(beta, _else_id)
+                } else if self.unsat(beta, notalpha) {
+                    // beta ⊆ alpha, so beta ∧ alpha = beta
+                    self.clean(beta, _then_id)
+                } else {
                     let tc = self.mb.solver.and_id(beta, alpha);
+                    let ec = self.mb.solver.and_id(beta, notalpha);
                     let new_then = self.clean(tc, _then_id);
-                    return new_then;
+                    let new_else = self.clean(ec, _else_id);
+                    self.mk_ite(alpha, new_then, new_else)
                 }
-
-                let ei = _else_id;
-                let tc = self.mb.solver.and_id(beta, alpha);
-                let ec = self.mb.solver.and_id(beta, notalpha);
-                let new_then = self.clean(tc, _then_id);
-                let new_else = self.clean(ec, ei);
-                return self.mk_ite(tc, new_then, new_else);
             }
-        }
+        };
+        self.clean_cache.insert((beta, tterm), result);
+        result
     }
 
     fn mk_unary(
@@ -742,42 +757,59 @@ impl RegexBuilder {
         right: TRegexId,
         apply: &mut impl FnMut(&mut RegexBuilder, NodeId, NodeId) -> NodeId,
     ) -> TRegexId {
-        match self.tr_array[left.0 as usize] {
+        self.mk_binary_memo.clear();
+        self.mk_binary_inner(left, right, apply)
+    }
+
+    fn mk_binary_inner(
+        &mut self,
+        left: TRegexId,
+        right: TRegexId,
+        apply: &mut impl FnMut(&mut RegexBuilder, NodeId, NodeId) -> NodeId,
+    ) -> TRegexId {
+        if left == right {
+            return self.mk_unary(left, &mut |b, n| apply(b, n, n));
+        }
+        if let Some(&cached) = self.mk_binary_memo.get(&(left, right)) {
+            return cached;
+        }
+        let result = match self.tr_array[left.0 as usize] {
             TRegex::Leaf(left_node_id) => match self.tr_array[right.0 as usize] {
                 TRegex::Leaf(right_node_id) => {
                     let applied = apply(self, left_node_id, right_node_id);
                     self.mk_leaf(applied)
                 }
                 TRegex::ITE(c2, _then, _else) => {
-                    let then2 = self.mk_binary(left, _then, apply);
-                    let else2 = self.mk_binary(left, _else, apply);
+                    let then2 = self.mk_binary_inner(left, _then, apply);
+                    let else2 = self.mk_binary_inner(left, _else, apply);
                     self.mk_ite(c2, then2, else2)
                 }
             },
             TRegex::ITE(c1, _then1, _else1) => match self.tr_array[right.0 as usize] {
                 TRegex::Leaf(_) => {
-                    let then2 = self.mk_binary(_then1, right, apply);
-                    let else2 = self.mk_binary(_else1, right, apply);
+                    let then2 = self.mk_binary_inner(_then1, right, apply);
+                    let else2 = self.mk_binary_inner(_else1, right, apply);
                     self.mk_ite(c1, then2, else2)
                 }
                 TRegex::ITE(c2, _then2, _else2) => {
                     if c1 == c2 {
-                        let _then = self.mk_binary(_then1, _then2, apply);
-                        let _else = self.mk_binary(_else1, _else2, apply);
-                        return self.mk_ite(c1, _then, _else);
-                    }
-                    if c1.0 > c2.0 {
-                        let _then = self.mk_binary(_then1, right, apply);
-                        let _else = self.mk_binary(_else1, right, apply);
-                        return self.mk_ite(c1, _then, _else);
+                        let _then = self.mk_binary_inner(_then1, _then2, apply);
+                        let _else = self.mk_binary_inner(_else1, _else2, apply);
+                        self.mk_ite(c1, _then, _else)
+                    } else if c1.0 > c2.0 {
+                        let _then = self.mk_binary_inner(_then1, right, apply);
+                        let _else = self.mk_binary_inner(_else1, right, apply);
+                        self.mk_ite(c1, _then, _else)
                     } else {
-                        let _then = self.mk_binary(left, _then2, apply);
-                        let _else = self.mk_binary(left, _else2, apply);
-                        return self.mk_ite(c2, _then, _else);
+                        let _then = self.mk_binary_inner(left, _then2, apply);
+                        let _else = self.mk_binary_inner(left, _else2, apply);
+                        self.mk_ite(c2, _then, _else)
                     }
                 }
             },
-        }
+        };
+        self.mk_binary_memo.insert((left, right), result);
+        result
     }
 
     pub fn get_nulls(
@@ -3295,7 +3327,7 @@ impl RegexBuilder {
         self.mk_compl(node_ts)
     }
 
-    pub(crate) fn mk_pred_not(&mut self, set: TSetId) -> NodeId {
+    pub fn mk_pred_not(&mut self, set: TSetId) -> NodeId {
         let notset = self.solver().not_id(set);
         self.mk_pred(notset)
     }
@@ -3308,6 +3340,15 @@ impl RegexBuilder {
     pub fn mk_range_u8(&mut self, start: u8, end_inclusive: u8) -> NodeId {
         let rangeset = self.solver().range_to_set_id(start, end_inclusive);
         self.mk_pred(rangeset)
+    }
+
+    pub fn mk_ranges_u8(&mut self, ranges: &[(u8, u8)]) -> NodeId {
+        let mut node = self.mk_range_u8(ranges[0].0, ranges[0].1);
+        for &(lo, hi) in &ranges[1..] {
+            let r = self.mk_range_u8(lo, hi);
+            node = self.mk_union(node, r);
+        }
+        node
     }
 
     pub fn extract_literal_prefix(&self, node: NodeId) -> (Vec<u8>, bool) {
@@ -3377,7 +3418,7 @@ impl RegexBuilder {
             return NodeId::BOT;
         }
         if sorted.len() > 16 {
-            let mut by_head: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+            let mut by_head: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
             let mut non_concat: Vec<NodeId> = Vec::new();
             for &n in &sorted {
                 if self.get_kind(n) == Kind::Concat {
@@ -3386,22 +3427,34 @@ impl RegexBuilder {
                     non_concat.push(n);
                 }
             }
+            // absorb non-concat nodes whose id matches a by_head key:
+            // x | x·t1 | x·t2 → x·(ε|t1|t2)
+            // without this, factoring reproduces identical groups and
+            // recurses infinitely.
+            let mut absorbed: Vec<NodeId> = Vec::new();
+            for &n in &non_concat {
+                if by_head.contains_key(&n) {
+                    absorbed.push(n);
+                }
+            }
+            if !absorbed.is_empty() {
+                non_concat.retain(|n| !absorbed.contains(n));
+            }
             if by_head.len() < sorted.len() {
                 let mut groups: Vec<NodeId> = non_concat;
                 for (head, tails) in by_head {
-                    if tails.len() == 1 {
-                        groups.push(tails[0]);
-                    } else {
-                        let tail_nodes: Vec<NodeId> =
-                            tails.iter().map(|&n| self.get_right(n)).collect();
-                        let tail_union = self.mk_unions(tail_nodes.into_iter());
-                        let factored = self.mk_concat(head, tail_union);
-                        groups.push(factored);
+                    let mut tail_nodes: Vec<NodeId> =
+                        tails.iter().map(|&n| self.get_right(n)).collect();
+                    if absorbed.contains(&head) {
+                        tail_nodes.push(NodeId::EPS);
                     }
+                    let tail_union = self.mk_unions(tail_nodes.into_iter());
+                    let factored = self.mk_concat(head, tail_union);
+                    groups.push(factored);
                 }
                 groups.sort();
                 groups.dedup();
-                return self.mk_unions(groups.into_iter());
+                return self.mk_unions_balanced(&groups);
             }
         }
         self.mk_unions_balanced(&sorted)
@@ -3620,7 +3673,7 @@ impl RegexBuilder {
             return Ok(NodeFlags::ZERO);
         }
 
-        let mut visited: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut visited: FxHashMap<NodeId, NodeId> = FxHashMap::default();
         let mut todo: VecDeque<NodeId> = VecDeque::new();
         let begin_der = self.der(initial_node, Nullability::BEGIN)?;
         let mut stack = Vec::new();

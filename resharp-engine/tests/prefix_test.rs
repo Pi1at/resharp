@@ -232,8 +232,8 @@ fn potential_start_rev_lookbehind() {
 #[test]
 fn potential_start_rev_word_boundary() {
     let s = potential_start_pp(r"\b[A-Z][a-z]+\b");
-    // optimized word boundary rewrite produces simpler prefix
-    assert_eq!(s, "_;_");
+    // neg lookahead/lookbehind for unicode \w makes prefix extraction harder
+    assert_eq!(s, "");
 }
 
 #[test]

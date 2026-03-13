@@ -245,28 +245,24 @@ fn dispatch_info(pattern: &str) -> (bool, bool, bool) {
 
 #[test]
 fn dispatch_bounded_repeat() {
-    let (bdfa, fwd, rev) = dispatch_info("[A-Za-z]{8,13}");
-    eprintln!("[A-Za-z]{{8,13}}: bdfa={} fwd={} rev={}", bdfa, fwd, rev);
+    let (bdfa, _fwd, _rev) = dispatch_info("[A-Za-z]{8,13}");
     assert!(bdfa);
 }
 
 #[test]
 fn dispatch_alt_suffix() {
-    let (bdfa, fwd, rev) = dispatch_info("(Sherlock|Holmes)[a-z]{0,5}");
-    eprintln!("alt+suffix: bdfa={} fwd={} rev={}", bdfa, fwd, rev);
+    let (bdfa, _fwd, _rev) = dispatch_info("(Sherlock|Holmes)[a-z]{0,5}");
     assert!(bdfa);
 }
 
 #[test]
 fn dispatch_date() {
-    let (bdfa, fwd, rev) = dispatch_info(r"\d{4}-\d{2}-\d{2}");
-    eprintln!("date: bdfa={} fwd={} rev={}", bdfa, fwd, rev);
+    let (bdfa, _fwd, _rev) = dispatch_info(r"\d{4}-\d{2}-\d{2}");
     assert!(bdfa);
 }
 
 #[test]
 fn dispatch_literal() {
-    let (bdfa, fwd, rev) = dispatch_info("Sherlock Holmes");
-    eprintln!("literal: bdfa={} fwd={} rev={}", bdfa, fwd, rev);
+    let (bdfa, _fwd, _rev) = dispatch_info("Sherlock Holmes");
     assert!(!bdfa);
 }

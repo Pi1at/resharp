@@ -11,8 +11,12 @@ keywords = ["regex", "automata", "boolean-algebra"]
 categories = ["algorithms"]
 readme = "../README.md"
 
+[lib]
+doctest = false
+test = false
+
 [dependencies]
-smallvec = "1.14.0"
+rustc-hash = "2"
 
 [features]
 graphviz = []
