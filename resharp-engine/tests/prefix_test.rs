@@ -234,8 +234,8 @@ fn potential_start_rev_lookbehind() {
 #[test]
 fn potential_start_rev_word_boundary() {
     let s = potential_start_pp(r"\b[A-Z][a-z]+\b");
-    // word boundary produces wide byte sets from the reversed suffix
-    assert_eq!(s, r"[\x00-\xBF];[\x00-\xBF\xC2-\xDF]");
+    // optimized word boundary rewrite produces simpler prefix
+    assert_eq!(s, "_;_");
 }
 
 #[test]

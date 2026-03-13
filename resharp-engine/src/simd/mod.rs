@@ -1,7 +1,17 @@
 pub use resharp_algebra::solver::TSet;
 
+// higher value = more common in typical text = worse search target.
+// covers all 256 byte values assuming UTF-8 encoded input.
 pub static BYTE_FREQ: [u8; 256] = {
-    let mut t = [255u8; 256];
+    let mut t = [0u8; 256];
+
+    // ASCII whitespace
+    t[0x09] = 70;  // TAB
+    t[0x0A] = 205; // LF
+    t[0x0D] = 195; // CR
+    t[0x20] = 210; // space
+
+    // ASCII lowercase (English letter frequency)
     t[b'e' as usize] = 200;
     t[b't' as usize] = 190;
     t[b'a' as usize] = 180;
@@ -29,6 +39,7 @@ pub static BYTE_FREQ: [u8; 256] = {
     t[b'q' as usize] = 40;
     t[b'z' as usize] = 35;
 
+    // ASCII uppercase
     t[b'E' as usize] = 30;
     t[b'T' as usize] = 29;
     t[b'A' as usize] = 28;
@@ -56,25 +67,96 @@ pub static BYTE_FREQ: [u8; 256] = {
     t[b'Q' as usize] = 6;
     t[b'Z' as usize] = 5;
 
-    t[b' ' as usize] = 210;
-    t[b'\n' as usize] = 205;
-    t[b'\r' as usize] = 195;
-    t[b'.' as usize] = 70;
-    t[b',' as usize] = 65;
-    t[b'\'' as usize] = 55;
-    t[b'"' as usize] = 50;
-    t[b'-' as usize] = 48;
-
-    t[b'0' as usize] = 60;
-    t[b'1' as usize] = 58;
-    t[b'2' as usize] = 56;
-    t[b'3' as usize] = 54;
-    t[b'4' as usize] = 52;
-    t[b'5' as usize] = 50;
-    t[b'6' as usize] = 48;
-    t[b'7' as usize] = 46;
-    t[b'8' as usize] = 44;
+    // ASCII digits
+    t[b'0' as usize] = 60; t[b'1' as usize] = 58; t[b'2' as usize] = 56;
+    t[b'3' as usize] = 54; t[b'4' as usize] = 52; t[b'5' as usize] = 50;
+    t[b'6' as usize] = 48; t[b'7' as usize] = 46; t[b'8' as usize] = 44;
     t[b'9' as usize] = 42;
+
+    // ASCII punctuation
+    t[b'.' as usize] = 70; t[b',' as usize] = 65; t[b'\'' as usize] = 55;
+    t[b'"' as usize] = 50; t[b'-' as usize] = 48; t[b':' as usize] = 45;
+    t[b'/' as usize] = 40; t[b'(' as usize] = 35; t[b')' as usize] = 35;
+    t[b';' as usize] = 35; t[b'_' as usize] = 35; t[b'!' as usize] = 30;
+    t[b'=' as usize] = 30; t[b'#' as usize] = 25; t[b'*' as usize] = 25;
+    t[b'<' as usize] = 25; t[b'>' as usize] = 25; t[b'+' as usize] = 20;
+    t[b'%' as usize] = 20; t[b'&' as usize] = 20; t[b'?' as usize] = 20;
+    t[b'[' as usize] = 20; t[b']' as usize] = 20; t[b'{' as usize] = 20;
+    t[b'}' as usize] = 20; t[b'@' as usize] = 15; t[b'$' as usize] = 15;
+    t[b'\\' as usize] = 15; t[b'|' as usize] = 15; t[b'`' as usize] = 15;
+    t[b'^' as usize] = 10; t[b'~' as usize] = 10;
+
+    // UTF-8 continuation bytes 0x80-0x8F
+    // after D1: Cyrillic lowercase р с т у ф х ц ч ш щ ъ ы ь э ю я
+    // values reflect Cyrillic letter frequency + CJK/Latin baseline
+    t[0x80] = 140; t[0x81] = 135; t[0x82] = 135; t[0x83] = 105;
+    t[0x84] = 30;  t[0x85] = 55;  t[0x86] = 35;  t[0x87] = 70;
+    t[0x88] = 50;  t[0x89] = 30;  t[0x8A] = 15;  t[0x8B] = 85;
+    t[0x8C] = 85;  t[0x8D] = 30;  t[0x8E] = 40;  t[0x8F] = 90;
+
+    // UTF-8 continuation bytes 0x90-0x9F
+    // after D0: Cyrillic uppercase А Б В Г Д Е Ж З И Й К Л М Н О П
+    // also E2 80 9x smart punctuation (-, "", '')
+    t[0x90] = 25;  t[0x91] = 20;  t[0x92] = 20;  t[0x93] = 15;
+    t[0x94] = 20;  t[0x95] = 20;  t[0x96] = 15;  t[0x97] = 15;
+    t[0x98] = 20;  t[0x99] = 15;  t[0x9A] = 15;  t[0x9B] = 15;
+    t[0x9C] = 20;  t[0x9D] = 20;  t[0x9E] = 25;  t[0x9F] = 15;
+
+    // UTF-8 continuation bytes 0xA0-0xAF
+    // after D0: Cyrillic uppercase Р С Т У Ф Х Ц Ч Ш Щ Ъ Ы Ь Э Ю Я
+    // after C2/C3: NBSP ¡ ¢ £ ¤ ¥ ... / à á â ã ä å æ ç è é ê ë ì í î ï
+    t[0xA0] = 45;  t[0xA1] = 25;  t[0xA2] = 20;  t[0xA3] = 20;
+    t[0xA4] = 30;  t[0xA5] = 15;  t[0xA6] = 15;  t[0xA7] = 20;
+    t[0xA8] = 20;  t[0xA9] = 30;  t[0xAA] = 15;  t[0xAB] = 20;
+    t[0xAC] = 15;  t[0xAD] = 15;  t[0xAE] = 15;  t[0xAF] = 15;
+
+    // UTF-8 continuation bytes 0xB0-0xBF
+    // after D0: Cyrillic lowercase а б в г д е ж з и й к л м н о п
+    // after C3: Latin accented ð ñ ò ó ô õ ö ÷ ø ù ú û ü ý þ ÿ
+    t[0xB0] = 160; t[0xB1] = 80;  t[0xB2] = 130; t[0xB3] = 80;
+    t[0xB4] = 115; t[0xB5] = 170; t[0xB6] = 55;  t[0xB7] = 75;
+    t[0xB8] = 155; t[0xB9] = 65;  t[0xBA] = 120; t[0xBB] = 125;
+    t[0xBC] = 115; t[0xBD] = 150; t[0xBE] = 175; t[0xBF] = 105;
+
+    // UTF-8 2-byte lead bytes (0xC2-0xDF)
+    //   0xC0-C1 invalid (overlong), left at 0
+    t[0xC2] = 130; // Latin-1 supplement: NBSP © ® currency
+    t[0xC3] = 170; // Latin-1 accented: à á â ã ä å æ ç è é ê ë ...
+    t[0xC4] = 50;  // Latin Extended-A
+    t[0xC5] = 45;  // Latin Extended-A
+    t[0xC6] = 20;  // Latin Extended-B
+    t[0xC7] = 15;  t[0xC8] = 15;  t[0xC9] = 15;  // Latin Extended-B, IPA
+    t[0xCA] = 15;  t[0xCB] = 10;  // spacing modifiers
+    t[0xCC] = 50;  // combining diacritical marks (Vietnamese etc.)
+    t[0xCD] = 35;  // combining / Greek
+    t[0xCE] = 100; // Greek
+    t[0xCF] = 90;  // Greek continued
+    t[0xD0] = 230; // Cyrillic А-п (most common lead byte in Cyrillic text)
+    t[0xD1] = 220; // Cyrillic р-я
+    t[0xD2] = 25;  t[0xD3] = 20;  // extended Cyrillic
+    t[0xD4] = 15;  t[0xD5] = 15;  t[0xD6] = 10;  // Armenian, Georgian
+    t[0xD7] = 50;  // Hebrew
+    t[0xD8] = 70;  t[0xD9] = 65;  // Arabic
+    t[0xDA] = 35;  t[0xDB] = 30;  // Arabic supplemental
+    t[0xDC] = 10;  t[0xDD] = 5; t[0xDE] = 5; t[0xDF] = 5; // Syriac, Thaana, NKo
+
+    // UTF-8 3-byte lead bytes (0xE0-0xEF)
+    t[0xE0] = 70;  // Devanagari, Bengali, Tamil
+    t[0xE1] = 55;  // Tibetan, Myanmar, Georgian, Ethiopic
+    t[0xE2] = 120; // general punctuation & symbols (- "" • →)
+    t[0xE3] = 110; // CJK symbols, Hiragana, Katakana
+    t[0xE4] = 170; t[0xE5] = 170; t[0xE6] = 170; // CJK Unified Ideographs
+    t[0xE7] = 165; t[0xE8] = 165; t[0xE9] = 160; // CJK Unified Ideographs
+    t[0xEA] = 120; t[0xEB] = 110; t[0xEC] = 100; // Hangul Syllables
+    t[0xED] = 70;  // Hangul tail / surrogate half
+    t[0xEE] = 10;  // Private Use Area
+    t[0xEF] = 60;  // specials, halfwidth, BOM
+
+    // UTF-8 4-byte lead bytes (0xF0-0xF4)
+    t[0xF0] = 40;  // supplementary planes (emoji)
+    t[0xF1] = 10;  t[0xF2] = 5; t[0xF3] = 5; t[0xF4] = 3;
+    // 0xF5-0xFF invalid, left at 0
+
     t
 };
 
@@ -967,6 +1049,99 @@ impl FwdPrefixSearch {
     }
 }
 
+// ---- RevSearchRanges (AVX2) ----
+
+#[cfg(target_arch = "x86_64")]
+pub struct RevSearchRanges {
+    ranges: Vec<(u8, u8)>,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl RevSearchRanges {
+    pub fn new(ranges: Vec<(u8, u8)>) -> Self {
+        debug_assert!(!ranges.is_empty() && ranges.len() <= 3);
+        Self { ranges }
+    }
+
+    pub fn ranges(&self) -> &[(u8, u8)] {
+        &self.ranges
+    }
+
+    pub fn find_rev(&self, haystack: &[u8]) -> Option<usize> {
+        unsafe { self.find_rev_avx2(haystack) }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn find_rev_avx2(&self, haystack: &[u8]) -> Option<usize> {
+        let len = haystack.len();
+        if len == 0 {
+            return None;
+        }
+        let ptr = haystack.as_ptr();
+        let n = self.ranges.len();
+        let lo0 = _mm256_set1_epi8(self.ranges[0].0 as i8);
+        let hi0 = _mm256_set1_epi8(self.ranges[0].1 as i8);
+
+        if len >= 32 {
+            let mut pos = len - 32;
+            loop {
+                let chunk = _mm256_loadu_si256(ptr.add(pos) as *const __m256i);
+                let ge0 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo0), chunk);
+                let le0 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi0), chunk);
+                let mut mask = _mm256_movemask_epi8(_mm256_and_si256(ge0, le0)) as u32;
+                if n >= 2 {
+                    let lo1 = _mm256_set1_epi8(self.ranges[1].0 as i8);
+                    let hi1 = _mm256_set1_epi8(self.ranges[1].1 as i8);
+                    let ge1 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo1), chunk);
+                    let le1 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi1), chunk);
+                    mask |= _mm256_movemask_epi8(_mm256_and_si256(ge1, le1)) as u32;
+                }
+                if n >= 3 {
+                    let lo2 = _mm256_set1_epi8(self.ranges[2].0 as i8);
+                    let hi2 = _mm256_set1_epi8(self.ranges[2].1 as i8);
+                    let ge2 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo2), chunk);
+                    let le2 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi2), chunk);
+                    mask |= _mm256_movemask_epi8(_mm256_and_si256(ge2, le2)) as u32;
+                }
+                if mask != 0 {
+                    return Some(pos + 31 - mask.leading_zeros() as usize);
+                }
+                if pos < 32 {
+                    break;
+                }
+                pos -= 32;
+            }
+        }
+        if len < 32 {
+            let mut buf = [0u8; 32];
+            buf[..len].copy_from_slice(&haystack[..len]);
+            let chunk = _mm256_loadu_si256(buf.as_ptr() as *const __m256i);
+            let ge0 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo0), chunk);
+            let le0 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi0), chunk);
+            let mut mask = _mm256_movemask_epi8(_mm256_and_si256(ge0, le0)) as u32;
+            if n >= 2 {
+                let lo1 = _mm256_set1_epi8(self.ranges[1].0 as i8);
+                let hi1 = _mm256_set1_epi8(self.ranges[1].1 as i8);
+                let ge1 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo1), chunk);
+                let le1 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi1), chunk);
+                mask |= _mm256_movemask_epi8(_mm256_and_si256(ge1, le1)) as u32;
+            }
+            if n >= 3 {
+                let lo2 = _mm256_set1_epi8(self.ranges[2].0 as i8);
+                let hi2 = _mm256_set1_epi8(self.ranges[2].1 as i8);
+                let ge2 = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, lo2), chunk);
+                let le2 = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, hi2), chunk);
+                mask |= _mm256_movemask_epi8(_mm256_and_si256(ge2, le2)) as u32;
+            }
+            mask &= (1u32 << len) - 1;
+            if mask != 0 {
+                return Some(31 - mask.leading_zeros() as usize);
+            }
+        }
+        None
+    }
+}
+
 // ---- stubs (never constructed, only needed for type-checking) ----
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -1033,6 +1208,22 @@ impl FwdPrefixSearch {
     }
 
     pub fn find_fwd(&self, _haystack: &[u8], _start: usize) -> Option<usize> {
+        unreachable!()
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub struct RevSearchRanges {
+    _private: (),
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+impl RevSearchRanges {
+    pub fn ranges(&self) -> &[(u8, u8)] {
+        unreachable!()
+    }
+
+    pub fn find_rev(&self, _haystack: &[u8]) -> Option<usize> {
         unreachable!()
     }
 }

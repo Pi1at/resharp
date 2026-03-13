@@ -37,6 +37,7 @@ fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Primitive {
     Literal(Literal),
@@ -1148,8 +1149,9 @@ impl<'s> ResharpParser<'s> {
                 (&regex_syntax::ast::ClassPerlKind::Word, false) => Word,
                 (&regex_syntax::ast::ClassPerlKind::Word, true) => NonWord,
                 (&regex_syntax::ast::ClassPerlKind::Space, false) => NonWord,
+                (&regex_syntax::ast::ClassPerlKind::Space, true) => Unknown,
                 (&regex_syntax::ast::ClassPerlKind::Digit, false) => Word,
-                _ => Unknown,
+                (&regex_syntax::ast::ClassPerlKind::Digit, true) => Unknown,
             },
             Ast::Dot(_) | Ast::Top(_) => Unknown,
             Ast::Group(g) => Self::word_char_kind(&g.ast, left),
@@ -1176,6 +1178,50 @@ impl<'s> ResharpParser<'s> {
             }
             Ast::Lookaround(la) => Self::word_char_kind(&la.ast, left),
             _ => Unknown,
+        }
+    }
+
+    fn edge_class_ast<'a>(ast: &'a Ast, left: bool) -> Option<&'a Ast> {
+        match ast {
+            Ast::Literal(_) | Ast::ClassPerl(_) | Ast::ClassBracketed(_)
+            | Ast::ClassUnicode(_) | Ast::Dot(_) | Ast::Top(_) => Some(ast),
+            Ast::Group(g) => Self::edge_class_ast(&g.ast, left),
+            Ast::Concat(c) if !c.asts.is_empty() => {
+                Self::edge_class_ast(&c.asts[if left { c.asts.len() - 1 } else { 0 }], left)
+            }
+            Ast::Repetition(r) => Self::edge_class_ast(&r.ast, left),
+            Ast::Lookaround(la) => Self::edge_class_ast(&la.ast, left),
+            _ => None,
+        }
+    }
+
+    fn resolve_word_kind(
+        &mut self,
+        asts: &[Ast],
+        idx: usize,
+        dir: isize,
+        translator: &mut Option<Translator>,
+        tb: &mut TB<'s>,
+        word_id: NodeId,
+        not_word_id: NodeId,
+    ) -> Result<WordCharKind> {
+        use WordCharKind::*;
+        let fast = Self::concat_neighbor_kind(asts, idx, dir);
+        if fast != Unknown {
+            return Ok(fast);
+        }
+        let neighbor_idx = (idx as isize + dir) as usize;
+        let edge = match Self::edge_class_ast(&asts[neighbor_idx], dir < 0) {
+            Some(e) => e,
+            None => return Ok(Unknown),
+        };
+        let node = self.ast_to_node_id(edge, translator, tb)?;
+        if tb.subsumes(word_id, node) == Some(true) {
+            Ok(Word)
+        } else if tb.subsumes(not_word_id, node) == Some(true) {
+            Ok(NonWord)
+        } else {
+            Ok(Unknown)
         }
     }
 
@@ -1207,10 +1253,11 @@ impl<'s> ResharpParser<'s> {
         tb: &mut TB<'s>,
     ) -> Result<(NodeId, usize)> {
         use WordCharKind::*;
-        let left = Self::concat_neighbor_kind(asts, idx, -1);
-        let right = Self::concat_neighbor_kind(asts, idx, 1);
         let word_id = self.get_class(false, regex_syntax::ast::ClassPerlKind::Word, tb)?;
         let not_word_id = self.get_class(true, regex_syntax::ast::ClassPerlKind::Word, tb)?;
+        let left = self.resolve_word_kind(asts, idx, -1, translator, tb, word_id, not_word_id)?;
+        let right =
+            self.resolve_word_kind(asts, idx, 1, translator, tb, word_id, not_word_id)?;
 
         match (left, right) {
             (NonWord, Word) | (Word, NonWord) => Ok((NodeId::EPS, idx + 1)),
@@ -1232,7 +1279,7 @@ impl<'s> ResharpParser<'s> {
                 let body = tb.mk_union(NodeId::BEGIN, word_id);
                 Ok((tb.mk_lookbehind(body, NodeId::MISSING), idx + 1))
             }
-            _ => Ok((self.make_full_word_boundary(tb)?, idx + 1)),
+            _ => return Err(self.error(self.span(), ast::ErrorKind::UnsupportedResharpRegex)),
         }
     }
 
@@ -1260,6 +1307,7 @@ impl<'s> ResharpParser<'s> {
         Ok((tb.mk_lookahead(merged, NodeId::MISSING, 0), next))
     }
 
+    #[allow(dead_code)]
     fn make_full_word_boundary(&mut self, tb: &mut TB<'s>) -> Result<NodeId> {
         let w = self.get_class(false, regex_syntax::ast::ClassPerlKind::Word, tb)?;
         let nw = self.get_class(true, regex_syntax::ast::ClassPerlKind::Word, tb)?;
@@ -1305,19 +1353,9 @@ impl<'s> ResharpParser<'s> {
                 ast::AssertionKind::StartText => Ok(NodeId::BEGIN),
                 ast::AssertionKind::EndText => Ok(NodeId::END),
                 ast::AssertionKind::WordBoundary => {
-                    let word_id =
-                        self.get_class(false, regex_syntax::ast::ClassPerlKind::Word, tb)?;
-                    let not_word_id =
-                        self.get_class(true, regex_syntax::ast::ClassPerlKind::Word, tb)?;
-                    // case1 : (?<=word)(?=not_word)
-                    let case1_1 = tb.mk_lookbehind(word_id, NodeId::MISSING);
-                    let case1_2 = tb.mk_lookahead(not_word_id, NodeId::MISSING, 0);
-                    let case1 = tb.mk_concat(case1_1, case1_2);
-                    // case2 : (?<=not_word)(?=word)
-                    let case2_1 = tb.mk_lookbehind(not_word_id, NodeId::MISSING);
-                    let case2_2 = tb.mk_lookahead(word_id, NodeId::MISSING, 0);
-                    let case2 = tb.mk_concat(case2_1, case2_2);
-                    Ok(tb.mk_union(case1, case2))
+                    return Err(
+                        self.error(self.span(), ast::ErrorKind::UnsupportedResharpRegex),
+                    )
                 }
                 ast::AssertionKind::NotWordBoundary => {
                     return Err(self.error(self.span(), ast::ErrorKind::UnsupportedResharpRegex))
@@ -1437,8 +1475,21 @@ impl<'s> ResharpParser<'s> {
                 }
             }
             Ast::Group(g) => {
-                let child = self.ast_to_node_id(&g.ast, translator, tb);
-                child
+                if let ast::GroupKind::NonCapturing(ref flags) = g.kind {
+                    if !flags.items.is_empty() {
+                        let mut translator_builder = Self::default_translator_builder();
+                        translator_builder.utf8(false);
+                        if let Some(state) = flags.flag_state(ast::Flag::CaseInsensitive) {
+                            translator_builder.case_insensitive(state);
+                        }
+                        if let Some(state) = flags.flag_state(ast::Flag::Unicode) {
+                            translator_builder.unicode(state);
+                        }
+                        let mut scoped = Some(translator_builder.build());
+                        return self.ast_to_node_id(&g.ast, &mut scoped, tb);
+                    }
+                }
+                self.ast_to_node_id(&g.ast, translator, tb)
             }
             Ast::Alternation(a) => {
                 let mut children = vec![];

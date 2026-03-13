@@ -107,6 +107,7 @@ struct RegexInner {
 pub struct Regex {
     inner: Mutex<RegexInner>,
     fwd_prefix: Option<accel::FwdPrefixSearch>,
+    fwd_prefix_stripped: bool,
     fixed_length: Option<u32>,
     #[allow(dead_code)]
     max_length: Option<u32>,
@@ -148,7 +149,7 @@ impl Regex {
         } else {
             None
         };
-        let can_match_fwd = !b.is_infinite(node) && !b.contains_look(node);
+        let has_look = b.contains_look(node);
 
         let max_cap = opts.max_dfa_capacity.min(u16::MAX as usize);
         let mut fwd = engine::LazyDFA::new(&mut b, fwd_start, max_cap)?;
@@ -159,10 +160,15 @@ impl Regex {
             rev.precompile(&mut b, opts.dfa_threshold);
         }
 
-        let fwd_prefix = if min_len > 0 && can_match_fwd {
-            engine::build_fwd_prefix(&mut b, node)?
+        let (fwd_prefix, fwd_prefix_stripped) = if min_len > 0 && !has_look {
+            let (fp, stripped) = engine::build_fwd_prefix(&mut b, node)?;
+            if fp.is_some() && !stripped && b.is_infinite(node) {
+                (None, false)
+            } else {
+                (fp, stripped)
+            }
         } else {
-            None
+            (None, false)
         };
 
         rev.compute_skip(&mut b, rev_start)?;
@@ -175,6 +181,7 @@ impl Regex {
                 nulls_buf: Vec::new(),
             }),
             fwd_prefix,
+            fwd_prefix_stripped,
             fixed_length,
             max_length,
             empty_nullable,
@@ -187,6 +194,14 @@ impl Regex {
         (inner.fwd.state_nodes.len(), inner.rev.state_nodes.len())
     }
 
+    /// whether forward prefix or reverse skip acceleration is active.
+    pub fn has_accel(&self) -> (bool, bool) {
+        let inner = self.inner.lock().unwrap();
+        let fwd = self.fwd_prefix.is_some();
+        let rev = inner.rev.prefix_skip.is_some() || inner.rev.can_skip();
+        (fwd, rev)
+    }
+
     /// all non-overlapping matches, left-to-right.
     pub fn find_all(&self, input: &[u8]) -> Result<Vec<Match>, Error> {
         if input.is_empty() {
@@ -197,6 +212,9 @@ impl Regex {
             };
         }
         if self.fwd_prefix.is_some() {
+            if self.fwd_prefix_stripped {
+                return self.find_all_fwd_prefix_stripped(input);
+            }
             return self.find_all_fwd_prefix(input);
         }
         self.find_all_dfa(input)
@@ -233,6 +251,12 @@ impl Regex {
     fn find_all_dfa(&self, input: &[u8]) -> Result<Vec<Match>, Error> {
         let inner = &mut *self.inner.lock().unwrap();
 
+        let rev_initial_nullable = inner.rev.effects_id[inner.rev.initial as usize] != 0;
+
+        if rev_initial_nullable {
+            return Self::find_all_nullable_slow(&mut inner.fwd, &mut inner.b, input);
+        }
+
         inner.nulls_buf.clear();
 
         inner
@@ -258,13 +282,33 @@ impl Regex {
                 .scan_fwd_all(&mut inner.b, &inner.nulls_buf, input, &mut matches)?;
         }
 
-        if inner.rev.effects_id[inner.rev.initial as usize] != 0 {
-            matches.push(Match {
-                start: input.len(),
-                end: input.len(),
-            });
-        }
+        Ok(matches)
+    }
 
+    fn find_all_nullable_slow(
+        fwd: &mut engine::LazyDFA,
+        b: &mut RegexBuilder,
+        input: &[u8],
+    ) -> Result<Vec<Match>, Error> {
+        let mut matches = Vec::new();
+        let mut pos = 0;
+        while pos < input.len() {
+            let max_end = fwd.scan_fwd(b, pos, input)?;
+            if max_end != engine::NO_MATCH && max_end > pos {
+                matches.push(Match {
+                    start: pos,
+                    end: max_end,
+                });
+                pos = max_end;
+            } else {
+                matches.push(Match { start: pos, end: pos });
+                pos += 1;
+            }
+        }
+        matches.push(Match {
+            start: input.len(),
+            end: input.len(),
+        });
         Ok(matches)
     }
 
@@ -313,6 +357,69 @@ impl Regex {
                         continue;
                     }
                 }
+                search_start = candidate + 1;
+            }
+        }
+
+        Ok(matches)
+    }
+
+    fn find_all_fwd_prefix_stripped(&self, input: &[u8]) -> Result<Vec<Match>, Error> {
+        let fwd_prefix = self.fwd_prefix.as_ref().unwrap();
+        let inner = &mut *self.inner.lock().unwrap();
+        let prefix_len = fwd_prefix.len();
+        let num_mt = inner.fwd.num_minterms as usize;
+        let initial = inner.fwd.initial;
+        // ensure initial state center transitions are compiled for backward scan
+        inner.fwd.precompile_state(&mut inner.b, initial)?;
+        let mut matches = Vec::new();
+        let mut search_start = 0;
+
+        while let Some(candidate) = fwd_prefix.find_fwd(input, search_start) {
+            // walk prefix using center transitions (not begin_table)
+            let mut state = initial;
+            for i in 0..prefix_len {
+                let mt = inner.fwd.minterms_lookup[input[candidate + i] as usize] as u32;
+                state = inner.fwd.lazy_transition(&mut inner.b, state, mt)?;
+                if state == engine::DFA_DEAD {
+                    break;
+                }
+            }
+            if state == engine::DFA_DEAD {
+                search_start = candidate + 1;
+                continue;
+            }
+            let max_end = inner.fwd.scan_fwd_from(
+                &mut inner.b,
+                state as u32,
+                candidate + prefix_len,
+                input,
+            )?;
+            if max_end == engine::NO_MATCH {
+                search_start = candidate + 1;
+                continue;
+            }
+            // scan backward: extend match start while initial state stays alive
+            let mut match_start = candidate;
+            while match_start > search_start {
+                let b = input[match_start - 1];
+                let mt = inner.fwd.minterms_lookup[b as usize] as usize;
+                let delta = initial as usize * num_mt + mt;
+                let in_bounds = delta < inner.fwd.center_table.len();
+                let ct_val = if in_bounds { inner.fwd.center_table[delta] } else { 0 };
+                if in_bounds && ct_val > engine::DFA_DEAD {
+                    match_start -= 1;
+                } else {
+                    break;
+                }
+            }
+            if max_end > match_start {
+                matches.push(Match {
+                    start: match_start,
+                    end: max_end,
+                });
+                search_start = max_end;
+            } else {
                 search_start = candidate + 1;
             }
         }

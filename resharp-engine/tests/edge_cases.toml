@@ -27,16 +27,12 @@ name = "ci_scoped"
 pattern = "(?i:abc)def"
 input = "ABCdef"
 matches = [[0, 6]]
-ignore = true
-reason = "scoped (?i:...) flag not propagated into group"
 
 [[test]]
 name = "ci_scoped_boundary"
 pattern = "(?i:abc)def"
 input = "ABCDEF"
 matches = []
-ignore = true
-reason = "scoped (?i:...) flag not propagated into group"
 
 [[test]]
 name = "ci_quantifier"

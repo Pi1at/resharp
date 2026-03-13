@@ -693,3 +693,390 @@ fn literal_17_bytes() {
     let r: Vec<_> = re.find_all(&hay).unwrap().iter().map(|m| (m.start, m.end)).collect();
     assert_eq!(r, vec![(40, 57)]);
 }
+
+// -- case insensitivity cross-validated against regex crate --
+
+#[test]
+fn ci_literal_vs_regex() {
+    check_vs_regex("(?i)abc", b"xAbCx");
+}
+
+#[test]
+fn ci_literal_no_match() {
+    check_vs_regex("(?i)abc", b"xyz");
+}
+
+#[test]
+fn ci_alternation_vs_regex() {
+    check_vs_regex("(?i)(foo|bar)", b"FOO and Bar and bAr");
+}
+
+#[test]
+fn ci_class_range_vs_regex() {
+    check_vs_regex("(?i)[a-f]+", b"xABCDEFx");
+}
+
+#[test]
+fn ci_quantifier_vs_regex() {
+    check_vs_regex("(?i)a+", b"aAaA");
+}
+
+#[test]
+fn ci_bounded_repeat_vs_regex() {
+    check_vs_regex("(?i)ab{2,4}", b"aBBBx");
+}
+
+#[test]
+fn ci_dotstar_vs_regex() {
+    check_vs_regex("(?i)a.*z", b"AbcZ");
+}
+
+#[test]
+fn ci_mixed_case_literal() {
+    check_vs_regex("(?i)HeLLo", b"hello HELLO HeLLo hElLo");
+}
+
+#[test]
+fn ci_word_boundary() {
+    check_vs_regex(r"(?i)\bhello\b", b"Hello HELLO hello");
+}
+
+#[test]
+fn ci_digits_unaffected() {
+    check_vs_regex("(?i)test123", b"TEST123 test123 TeSt123");
+}
+
+#[test]
+fn ci_char_class_explicit() {
+    check_vs_regex("(?i)[xyz]+", b"XyZxYz");
+}
+
+#[test]
+fn ci_negated_class() {
+    check_vs_regex("(?i)[^a-c]+", b"xABCxDEFx");
+}
+
+#[test]
+fn ci_anchored_start() {
+    check_vs_regex("(?i)^hello", b"Hello world");
+}
+
+#[test]
+fn ci_anchored_end() {
+    check_vs_regex("(?i)world$", b"hello WORLD");
+}
+
+#[test]
+fn ci_anchored_full() {
+    check_vs_regex("(?i)^hello world$", b"HELLO WORLD");
+}
+
+#[test]
+fn ci_anchored_no_match() {
+    check_vs_regex("(?i)^hello$", b"xhellox");
+}
+
+#[test]
+fn ci_optional() {
+    check_vs_regex("(?i)colou?r", b"Color COLOUR color colour");
+}
+
+#[test]
+fn ci_plus_quantifier() {
+    check_vs_regex("(?i)z+", b"zZzZZz");
+}
+
+#[test]
+fn ci_star_quantifier() {
+    check_vs_regex("(?i)ab*c", b"AC ABC ABBC ac abc");
+}
+
+#[test]
+fn ci_escape_sequence() {
+    check_vs_regex(r"(?i)\d+[a-f]+", b"123ABC 456def 789aF");
+}
+
+#[test]
+fn ci_lookahead() {
+    let re = Regex::new("(?i)foo(?=bar)").unwrap();
+    let r: Vec<_> = re.find_all(b"FOOBAR foobar FoObAr foobaz").unwrap().iter().map(|m| (m.start, m.end)).collect();
+    assert_eq!(r, vec![(0, 3), (7, 10), (14, 17)]);
+}
+
+#[test]
+fn ci_lookbehind() {
+    let re = Regex::new("(?i)(?<=foo)bar").unwrap();
+    let r: Vec<_> = re.find_all(b"FOOBAR foobar FoObAr bazbar").unwrap().iter().map(|m| (m.start, m.end)).collect();
+    assert_eq!(r, vec![(3, 6), (10, 13), (17, 20)]);
+}
+
+#[test]
+fn ci_empty_input() {
+    check_vs_regex("(?i)abc", b"");
+}
+
+#[test]
+fn ci_single_char() {
+    check_vs_regex("(?i)a", b"AaAa");
+}
+
+#[test]
+fn ci_unicode_ascii() {
+    check_vs_regex("(?i)caf", b"CAF caf Caf");
+}
+
+#[test]
+fn ci_pipe_in_group() {
+    check_vs_regex("(?i)(cat|dog|bird)", b"CAT Dog BIRD cat");
+}
+
+#[test]
+fn ci_nested_groups() {
+    check_vs_regex("(?i)(a(bc)d)", b"ABCD abcd AbCd");
+}
+
+#[test]
+fn ci_exact_repeat() {
+    check_vs_regex("(?i)a{3}", b"aAa AAA aaa");
+}
+
+#[test]
+fn ci_range_repeat() {
+    check_vs_regex("(?i)x{2,4}", b"xX XXx xXxX");
+}
+
+#[test]
+fn ci_scoped_vs_regex() {
+    check_vs_regex("(?i:abc)def", b"ABCdef abcDEF ABCDef abcdef");
+}
+
+#[test]
+fn ci_scoped_no_leak() {
+    check_vs_regex("(?i:abc)def", b"ABCDEF");
+}
+
+#[test]
+fn ci_scoped_alternation() {
+    check_vs_regex("(?i:foo|bar)baz", b"FOObaz BARbaz foobaz FOOBAZ");
+}
+
+#[test]
+fn ci_scoped_class() {
+    check_vs_regex("(?i:[a-f])+g", b"ABCDEFg abcdefg ABCDEfG");
+}
+
+#[test]
+fn ci_scoped_nested() {
+    check_vs_regex("(?i:a(?-i:b)c)", b"AbC ABC abc aBc");
+}
+
+// -- word boundary tests --
+
+#[test]
+fn wb_bare_11() {
+    check_vs_regex(r"\b11\b", b"11");
+}
+
+#[test]
+fn wb_leading_space() {
+    check_vs_regex(r"\b11\b", b" 11");
+}
+
+#[test]
+fn wb_trailing_space() {
+    check_vs_regex(r"\b11\b", b"11 ");
+}
+
+#[test]
+fn wb_both_spaces() {
+    check_vs_regex(r"\b11\b", b" 11 ");
+}
+
+#[test]
+fn wb_long_word_12plus() {
+    check_vs_regex(r"\b[a-z]{12,}\b", b"hello extraordinary world");
+}
+
+#[test]
+fn wb_long_word_no_match() {
+    check_vs_regex(r"\b[a-z]{12,}\b", b"hello world foo");
+}
+
+#[test]
+fn wb_long_word_multiple() {
+    check_vs_regex(r"\b[a-z]{12,}\b", b"understanding communication");
+}
+
+#[test]
+fn wb_long_word_mixed_case() {
+    check_vs_regex(r"\b[a-z]{12,}\b", b"THE understanding OF communication HERE");
+}
+
+#[test]
+fn wb_long_word_at_start() {
+    check_vs_regex(r"\b[a-z]{12,}\b", b"extraordinary!");
+}
+
+#[test]
+fn wb_long_word_at_end() {
+    check_vs_regex(r"\b[a-z]{12,}\b", b"!extraordinary");
+}
+
+#[test]
+fn wb_exact_13() {
+    check_vs_regex(r"\b[a-z]{13}\b", b"hello world extraordinary");
+}
+
+#[test]
+fn wb_exact_12_no_match() {
+    check_vs_regex(r"\b[a-z]{12}\b", b"hello world extraordinary");
+}
+
+#[test]
+fn wb_word_plus() {
+    check_vs_regex(r"\b\w+\b", b"hello world");
+}
+
+#[test]
+fn wb_digits() {
+    check_vs_regex(r"\b\d+\b", b"foo 123 bar");
+}
+
+#[test]
+fn wb_lowercase_words() {
+    check_vs_regex(r"\b[a-z]+\b", b"hello WORLD foo");
+}
+
+#[test]
+fn wb_partial_leading() {
+    check_vs_regex(r"\b11", b" 11");
+}
+
+#[test]
+fn wb_partial_trailing() {
+    check_vs_regex(r"11\b", b"11 ");
+}
+
+#[test]
+fn wb_partial_trailing_bare() {
+    check_vs_regex(r"11\b", b"11");
+}
+
+#[test]
+fn wb_contains_a() {
+    check_vs_regex(r"\b\w*a\w*\b", b"ffaff");
+}
+
+#[test]
+fn wb_trailing_a() {
+    check_vs_regex(r"a\b", b"a ");
+}
+
+#[test]
+fn wb_dash_boundary() {
+    check_vs_regex(r"\b-", b"1-2");
+}
+
+#[test]
+fn wb_before_dash() {
+    check_vs_regex(r"1\b-", b"1-2");
+}
+
+#[test]
+fn wb_across_dash() {
+    check_vs_regex(r"1\b-2", b"1-2");
+}
+
+#[test]
+fn wb_no_match_embedded() {
+    check_vs_regex(r"\b11\b", b"a11b");
+}
+
+#[test]
+fn wb_adjacent_words() {
+    check_vs_regex(r"\b[a-z]+\b", b"cat dog bird");
+}
+
+#[test]
+fn wb_bounded_rep_at_boundary() {
+    check_vs_regex(r"\b[a-z]{3,5}\b", b"cat extraordinary dog bird");
+}
+
+#[test]
+fn wb_whitespace_neighbor() {
+    check_vs_regex(r"\s\b[a-z]+\b\s", b" cat ");
+}
+
+#[test]
+fn wb_after_whitespace_class() {
+    check_vs_regex(r"[ \t]\b\w+", b" hello\tworld");
+}
+
+#[test]
+fn wb_alpha_class_union() {
+    check_vs_regex(r"\b[a-zA-Z]+\b", b"Hello WORLD foo 123");
+}
+
+#[test]
+fn wb_alnum_class() {
+    check_vs_regex(r"\b[a-zA-Z0-9]+\b", b"foo123 !bar! 42");
+}
+
+
+#[test]
+fn dotstar_inner_literal_correctness() {
+    check_vs_regex(".*=.*", b"key=value");
+    check_vs_regex(".*=.*", b"no equals here");
+    check_vs_regex(".*=.*", b"a=b c=d e=f");
+    check_vs_regex(".*=.*", b"first line\nsecond=line\nthird");
+    check_vs_regex(".*=.*", b"===");
+    check_vs_regex(".*=.*", b"x=y\na=b\n");
+}
+
+#[test]
+fn dotstar_inner_literal_accel() {
+    let re = Regex::new(".*=.*").unwrap();
+    let (fwd, rev) = re.has_accel();
+    // BFS strips leading .* and extracts '=' as forward prefix
+    // rev skip on '=' also active via reverse DFA
+    assert!(fwd, ".*=.* should have forward prefix on '='");
+    assert!(rev, ".*=.* should have reverse skip on '='");
+}
+
+#[test]
+fn dotstar_inner_literal_rev_midskip() {
+    let re = Regex::new(".*=.*").unwrap();
+    // exercise rev DFA with multiline input to trigger \n mid-skip on nullable state
+    let nulls = re.collect_rev_nulls_debug(b"first\nsecond=line\nthird");
+    let mut sorted = nulls.clone();
+    sorted.sort();
+    sorted.dedup();
+    // match starts: every position from 6 ('s' in second) to 12 ('=')
+    assert_eq!(sorted, vec![6, 7, 8, 9, 10, 11, 12]);
+}
+
+#[test]
+fn dotstar_huck_stripped_prefix() {
+    let re = Regex::new(".*Huck.*&~(.*F.*)").unwrap();
+    let m = re.find_all(b"The Adventures of Huckleberry Finn', published in 1885.").unwrap();
+    let r: Vec<_> = m.iter().map(|m| (m.start, m.end)).collect();
+    assert_eq!(r, vec![(0, 30)], ".*Huck.*&~(.*F.*)");
+}
+
+#[test]
+fn nullable_head_correctness() {
+    // non-Star nullable heads can't use backward scan (no self-loop)
+    let re = Regex::new(r"\d?abc").unwrap();
+    let check = |input: &[u8], expected: Vec<(usize, usize)>| {
+        let m = re.find_all(input).unwrap();
+        let r: Vec<_> = m.iter().map(|m| (m.start, m.end)).collect();
+        assert_eq!(r, expected, r"input={:?}", std::str::from_utf8(input).unwrap());
+    };
+    check(b"abc", vec![(0, 3)]);
+    check(b"1abc", vec![(0, 4)]);
+    check(b"x1abcx", vec![(1, 5)]);
+    check(b"xabcx", vec![(1, 4)]);
+    check(b"11abc", vec![(1, 5)]); // \d? is at most one digit
+    check(b"1abc2abc", vec![(0, 4), (4, 8)]);
+}
+

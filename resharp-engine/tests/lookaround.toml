@@ -149,16 +149,12 @@ name = "lookahead_end_anchor"
 pattern = 'a_*(?=\z)'
 input = "aaa"
 matches = [[0, 3]]
-ignore = true
-reason = "\\z anchor not yet supported"
 
 [[test]]
 name = "lookahead_end_anchor_wildcard"
 pattern = 'a_*(?=_*\z)'
 input = "aaa"
 matches = [[0, 3]]
-ignore = true
-reason = "\\z anchor not yet supported"
 
 # -- lookbehind --
 

@@ -675,3 +675,92 @@ fn is_match_class_lazy() {
     hay2[500] = b'5';
     assert!(re.is_match(&hay2).unwrap());
 }
+
+// -- RevSearchRanges --
+
+#[test]
+fn rev_range_skip_digit_sweep() {
+    for pos in 0..64 {
+        let mut hay = vec![b'.'; 64];
+        hay[pos] = b'0' + (pos as u8 % 10);
+        assert_simd_eq("[0-9]+", &hay);
+    }
+}
+
+#[test]
+fn rev_range_skip_uppercase_sweep() {
+    for pos in 0..64 {
+        let mut hay = vec![b'.'; 64];
+        hay[pos] = b'A' + (pos as u8 % 26);
+        assert_simd_eq("[A-Z]+", &hay);
+    }
+}
+
+#[test]
+fn rev_range_skip_two_ranges() {
+    // hex digits: [0-9A-F]
+    for pos in 0..64 {
+        let mut hay = vec![b'.'; 64];
+        hay[pos] = if pos % 2 == 0 { b'0' + (pos as u8 % 10) } else { b'A' + (pos as u8 % 6) };
+        assert_simd_eq("[0-9A-F]+", &hay);
+    }
+}
+
+#[test]
+fn rev_range_skip_no_match_long() {
+    let hay = vec![b'.'; 1024];
+    assert_simd("[0-9]+", &hay, &[]);
+    assert_simd("[A-Z]+", &hay, &[]);
+}
+
+#[test]
+fn rev_range_skip_all_match() {
+    let hay: Vec<u8> = (0..100).map(|i| b'0' + (i % 10)).collect();
+    assert_simd_eq("[0-9]+", &hay);
+}
+
+#[test]
+fn rev_range_skip_size_sweep() {
+    for size in (1..=200).step_by(7) {
+        let mut hay = vec![b'.'; size];
+        if size >= 3 {
+            hay[size / 2] = b'3';
+        }
+        assert_simd_eq("[0-9]+", &hay);
+        if size >= 3 {
+            hay[size / 2] = b'M';
+        }
+        assert_simd_eq("[A-Z]+", &hay);
+    }
+}
+
+#[test]
+fn range_skip_digit_plus_has_accel() {
+    let re = Regex::with_options("[0-9]+", lazy_opts()).unwrap();
+    let (_fwd, rev) = re.has_accel();
+    assert!(rev, "[0-9]+ should have rev accel");
+}
+
+#[test]
+fn range_skip_uppercase_plus_has_accel() {
+    let re = Regex::with_options("[A-Z]+", lazy_opts()).unwrap();
+    let (_fwd, rev) = re.has_accel();
+    assert!(rev, "[A-Z]+ should have rev accel");
+}
+
+#[test]
+fn range_skip_ip_address() {
+    let pattern = r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}";
+    let mut hay = vec![b' '; 500];
+    hay[200..213].copy_from_slice(b"192.168.1.100");
+    assert_simd_eq(pattern, &hay);
+}
+
+#[test]
+fn range_skip_uppercase_in_long_input() {
+    let pattern = "[A-Z]+";
+    let mut hay = vec![b'.'; 2000];
+    hay[500..503].copy_from_slice(b"ABC");
+    hay[1500..1504].copy_from_slice(b"WXYZ");
+    assert_simd_eq(pattern, &hay);
+}

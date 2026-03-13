@@ -1,7 +1,33 @@
 pub use crate::simd::RevPrefixSearch;
-pub use crate::simd::RevSearchBytes as MintermSearchValue;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub use crate::simd::TSet;
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub enum MintermSearchValue {
+    Exact(crate::simd::RevSearchBytes),
+    Range(crate::simd::RevSearchRanges),
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+impl MintermSearchValue {
+    #[inline(always)]
+    pub fn find_rev(&self, haystack: &[u8]) -> Option<usize> {
+        match self {
+            MintermSearchValue::Exact(s) => s.find_rev(haystack),
+            MintermSearchValue::Range(s) => s.find_rev(haystack),
+        }
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub enum MintermSearchValue {}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+impl MintermSearchValue {
+    pub fn find_rev(&self, _haystack: &[u8]) -> Option<usize> {
+        match *self {}
+    }
+}
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub enum FwdPrefixSearch {

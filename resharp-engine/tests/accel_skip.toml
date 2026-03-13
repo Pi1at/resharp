@@ -457,3 +457,36 @@ matches = [[0, 25]]
 pattern = '.*Huck.*&~(.*F.*)'
 input = "The Adventures of Huckleberry Finn', published in 1885."
 matches = [[0, 30]]
+
+# -- dotstar with inner literal (rev skip on '=') --
+
+[[test]]
+pattern = '.*=.*'
+input = 'key=value'
+matches = [[0, 9]]
+
+[[test]]
+pattern = '.*=.*'
+input = 'no equals here'
+matches = []
+
+[[test]]
+pattern = '.*=.*'
+input = "first\nsecond=line\nthird"
+matches = [[6, 17]]
+
+[[test]]
+pattern = '.*=.*'
+input = 'a=b c=d'
+matches = [[0, 7]]
+
+[[test]]
+pattern = '.*=.*'
+input = '==='
+matches = [[0, 3]]
+
+[[test]]
+name = 'dotstar inner literal long skip'
+pattern = '.*=.*'
+input = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaakey=value'
+matches = [[0, 73]]

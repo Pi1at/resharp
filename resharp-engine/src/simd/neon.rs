@@ -88,6 +88,89 @@ impl RevSearchBytes {
     }
 }
 
+pub struct RevSearchRanges {
+    ranges: Vec<(u8, u8)>,
+}
+
+impl RevSearchRanges {
+    pub fn new(ranges: Vec<(u8, u8)>) -> Self {
+        debug_assert!(!ranges.is_empty() && ranges.len() <= 3);
+        Self { ranges }
+    }
+
+    pub fn ranges(&self) -> &[(u8, u8)] {
+        &self.ranges
+    }
+
+    pub fn find_rev(&self, haystack: &[u8]) -> Option<usize> {
+        unsafe { self.find_rev_neon(haystack) }
+    }
+
+    unsafe fn find_rev_neon(&self, haystack: &[u8]) -> Option<usize> {
+        let len = haystack.len();
+        if len == 0 {
+            return None;
+        }
+        let ptr = haystack.as_ptr();
+        let n = self.ranges.len();
+        let lo0 = vdupq_n_u8(self.ranges[0].0);
+        let hi0 = vdupq_n_u8(self.ranges[0].1);
+
+        if len >= 16 {
+            let lo1 = if n >= 2 { vdupq_n_u8(self.ranges[1].0) } else { lo0 };
+            let hi1 = if n >= 2 { vdupq_n_u8(self.ranges[1].1) } else { hi0 };
+            let lo2 = if n >= 3 { vdupq_n_u8(self.ranges[2].0) } else { lo0 };
+            let hi2 = if n >= 3 { vdupq_n_u8(self.ranges[2].1) } else { hi0 };
+            let mut pos = len - 16;
+            loop {
+                let chunk = vld1q_u8(ptr.add(pos));
+                let in0 = vandq_u8(vcgeq_u8(chunk, lo0), vcleq_u8(chunk, hi0));
+                let combined = if n >= 3 {
+                    let in1 = vandq_u8(vcgeq_u8(chunk, lo1), vcleq_u8(chunk, hi1));
+                    let in2 = vandq_u8(vcgeq_u8(chunk, lo2), vcleq_u8(chunk, hi2));
+                    vorrq_u8(in0, vorrq_u8(in1, in2))
+                } else if n >= 2 {
+                    let in1 = vandq_u8(vcgeq_u8(chunk, lo1), vcleq_u8(chunk, hi1));
+                    vorrq_u8(in0, in1)
+                } else {
+                    in0
+                };
+                if vmaxvq_u8(combined) != 0 {
+                    let mask = neon_movemask(combined);
+                    return Some(pos + 15 - mask.leading_zeros() as usize);
+                }
+                if pos < 16 {
+                    break;
+                }
+                pos -= 16;
+            }
+        }
+        let gap = if len >= 16 { len % 16 } else { len };
+        if gap > 0 {
+            let mut buf = [0u8; 16];
+            buf[..gap].copy_from_slice(&haystack[..gap]);
+            let chunk = vld1q_u8(buf.as_ptr());
+            let in0 = vandq_u8(vcgeq_u8(chunk, lo0), vcleq_u8(chunk, hi0));
+            let mut mask = neon_movemask(in0);
+            if n >= 2 {
+                let lo1 = vdupq_n_u8(self.ranges[1].0);
+                let hi1 = vdupq_n_u8(self.ranges[1].1);
+                mask |= neon_movemask(vandq_u8(vcgeq_u8(chunk, lo1), vcleq_u8(chunk, hi1)));
+            }
+            if n >= 3 {
+                let lo2 = vdupq_n_u8(self.ranges[2].0);
+                let hi2 = vdupq_n_u8(self.ranges[2].1);
+                mask |= neon_movemask(vandq_u8(vcgeq_u8(chunk, lo2), vcleq_u8(chunk, hi2)));
+            }
+            mask &= (1u16 << gap) - 1;
+            if mask != 0 {
+                return Some(15 - mask.leading_zeros() as usize);
+            }
+        }
+        None
+    }
+}
+
 pub struct FwdLiteralSearch {
     needle: Vec<u8>,
     chunks: Vec<u64>,

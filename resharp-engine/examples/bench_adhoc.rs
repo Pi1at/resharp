@@ -52,6 +52,15 @@ fn main() {
             10,
         ),
         ("date", r"\d{4}-\d{2}-\d{2}", en.as_bytes(), 10),
+        ("digit-class", r"[0-9]+", en.as_bytes(), 10),
+        ("upper-class", r"[A-Z]+", en.as_bytes(), 10),
+        ("date-iso", r"\d{4}-\d{2}-\d{2}", en.as_bytes(), 10),
+        (
+            "ip-addr",
+            r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}",
+            en.as_bytes(),
+            10,
+        ),
         // ("dotstar-prefix", r"Holmes.*Watson", en.as_bytes(), 10), // TODO: needs multi-byte skip
         ("char-class-prefix", r"[A-Z][a-z]e [A-Z]", en.as_bytes(), 10),
     ];

@@ -82,24 +82,18 @@ name = "anchor_version_string_2_0"
 pattern = '\A[0-2](\.[0-9]+)+\z'
 input = "2.0"
 matches = [[0, 3]]
-ignore = true
-reason = "\\A/\\z anchors not yet supported"
 
 [[test]]
 name = "anchor_version_string_1_2_3"
 pattern = '\A[0-2](\.[0-9]+)+\z'
 input = "1.2.3"
 matches = [[0, 5]]
-ignore = true
-reason = "\\A/\\z anchors not yet supported"
 
 [[test]]
 name = "anchor_version_string_3_0"
 pattern = '\A[0-2](\.[0-9]+)+\z'
 input = "3.0"
 matches = []
-ignore = true
-reason = "\\A/\\z anchors not yet supported"
 
 [[test]]
 name = "anchor_empty_no_match"
@@ -120,64 +114,48 @@ name = "word_boundary_11_bare"
 pattern = '\b11\b'
 input = "11"
 matches = [[0, 2]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "word_boundary_11_leading_space"
 pattern = '\b11\b'
 input = " 11"
 matches = [[1, 3]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "word_boundary_11_trailing_space"
 pattern = '\b11\b'
 input = "11 "
 matches = [[0, 2]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "word_boundary_11_both_spaces"
 pattern = '\b11\b'
 input = " 11 "
 matches = [[1, 3]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "word_boundary_partial_leading"
 pattern = '\b11'
 input = " 11"
 matches = [[1, 3]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "word_boundary_partial_trailing_bare"
 pattern = '11\b'
 input = "11"
 matches = [[0, 2]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "word_boundary_partial_trailing_space"
 pattern = '11\b'
 input = "11 "
 matches = [[0, 2]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "word_boundary_contains_a"
 pattern = '\b\w*a\w*\b'
 input = "ffaff"
 matches = [[0, 5]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "word_boundary_then_any"
@@ -190,32 +168,24 @@ name = "word_boundary_trailing"
 pattern = 'a\b'
 input = "a "
 matches = [[0, 1]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "word_boundary_dash_1"
 pattern = '\b-'
 input = "1-2"
 matches = [[1, 2]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "word_boundary_dash_2"
 pattern = '1\b-'
 input = "1-2"
 matches = [[0, 2]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "word_boundary_dash_3"
 pattern = '1\b-2'
 input = "1-2"
 matches = [[0, 3]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 # -- character classes --
 
@@ -298,24 +268,18 @@ name = "quantifier_a_star_1"
 pattern = "a*"
 input = "bbbbaaabbbbb"
 matches = [[0,0],[1,1],[2,2],[3,3],[4,7],[7,7],[8,8],[9,9],[10,10],[11,11],[12,12]]
-ignore = true
-reason = "duplicate match at pos 0 for nullable patterns"
 
 [[test]]
 name = "quantifier_a_star_2"
 pattern = "a*"
 input = "bbbb"
 matches = [[0,0],[1,1],[2,2],[3,3],[4,4]]
-ignore = true
-reason = "duplicate match at pos 0 for nullable patterns"
 
 [[test]]
 name = "quantifier_wildcard_star"
 pattern = "_*"
 input = ""
 matches = [[0, 0]]
-ignore = true
-reason = "find_all returns empty on empty input"
 
 [[test]]
 name = "quantifier_greedy_a3"
@@ -452,32 +416,98 @@ name = "wb_alternation_pm"
 pattern = '(pm\b|p\.m\.|p\b|p m\b|p\. m\.\b|p\.m\b|p\. m\b)'
 input = "p. m"
 matches = [[0, 4]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "wb_alternation_pm_simple"
 pattern = '(pm\b|p\.m\.|p\b)'
 input = "p. m"
 matches = [[0, 1]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "wb_alternation_pm_with_space"
 pattern = '(pm\b|p\.m\.|p\b|p m\b)'
 input = "p. m"
 matches = [[0, 1]]
-ignore = true
-reason = "\\b word boundary not yet supported"
 
 [[test]]
 name = "wb_alternation_a"
 pattern = '(aa|ab|a\b)'
 input = "a c"
 matches = [[0, 1]]
-ignore = true
-reason = "\\b word boundary not yet supported"
+
+# -- word boundary with classes (bug investigation) --
+
+[[test]]
+name = "wb_long_word_12plus"
+pattern = '\b[a-z]{12,}\b'
+input = "hello extraordinary world"
+matches = [[6, 19]]
+
+[[test]]
+name = "wb_long_word_no_match"
+pattern = '\b[a-z]{12,}\b'
+input = "hello world foo"
+matches = []
+
+[[test]]
+name = "wb_long_word_multiple"
+pattern = '\b[a-z]{12,}\b'
+input = "understanding communication"
+matches = [[0, 13], [14, 27]]
+
+[[test]]
+name = "wb_long_word_mixed_case"
+pattern = '\b[a-z]{12,}\b'
+input = "THE understanding OF communication HERE"
+matches = [[4, 17], [21, 34]]
+
+[[test]]
+name = "wb_long_word_at_start"
+pattern = '\b[a-z]{12,}\b'
+input = "extraordinary!"
+matches = [[0, 13]]
+
+[[test]]
+name = "wb_long_word_at_end"
+pattern = '\b[a-z]{12,}\b'
+input = "!extraordinary"
+matches = [[1, 14]]
+
+[[test]]
+name = "wb_exact_13"
+pattern = '\b[a-z]{13}\b'
+input = "hello world extraordinary"
+matches = [[12, 25]]
+
+[[test]]
+name = "wb_exact_12_no_match"
+pattern = '\b[a-z]{12}\b'
+input = "hello world extraordinary"
+matches = []
+
+[[test]]
+name = "wb_adjacent_words"
+pattern = '\b[a-z]+\b'
+input = "cat dog bird"
+matches = [[0, 3], [4, 7], [8, 12]]
+
+[[test]]
+name = "wb_lowercase_words"
+pattern = '\b[a-z]+\b'
+input = "hello WORLD foo"
+matches = [[0, 5], [12, 15]]
+
+[[test]]
+name = "wb_bounded_rep_3_5"
+pattern = '\b[a-z]{3,5}\b'
+input = "cat extraordinary dog bird"
+matches = [[0, 3], [18, 21], [22, 26]]
+
+[[test]]
+name = "wb_no_match_embedded"
+pattern = '\b11\b'
+input = "a11b"
+matches = []
 
 # -- date validation --
 

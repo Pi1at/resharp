@@ -8,7 +8,7 @@ use crate::accel::MintermSearchValue;
 use crate::{Error, Match};
 
 pub const NO_MATCH: usize = usize::MAX;
-pub const DFA_DEAD: u32 = 1; // 0 = missing
+pub const DFA_DEAD: u16 = 1; // 0 = missing
 
 struct PartitionTree {
     sets: Vec<TSetId>,
@@ -296,12 +296,14 @@ pub fn calc_potential_start(
 }
 
 /// build a forward prefix search, picking the rarest BFS position for memchr.
+/// returns (prefix_search, stars_stripped) - stars_stripped means match start
+/// may be before the prefix candidate position.
 pub fn build_fwd_prefix(
     b: &mut RegexBuilder,
     node: NodeId,
-) -> Result<Option<crate::accel::FwdPrefixSearch>, crate::Error> {
+) -> Result<(Option<crate::accel::FwdPrefixSearch>, bool), crate::Error> {
     if !crate::simd::has_simd() {
-        return Ok(None);
+        return Ok((None, false));
     }
 
     build_fwd_prefix_simd(b, node)
@@ -311,10 +313,11 @@ pub fn build_fwd_prefix(
 fn build_fwd_prefix_simd(
     b: &mut RegexBuilder,
     node: NodeId,
-) -> Result<Option<crate::accel::FwdPrefixSearch>, crate::Error> {
+) -> Result<(Option<crate::accel::FwdPrefixSearch>, bool), crate::Error> {
+    let stripped = get_prefix_node(b, node) != node;
     let sets = calc_potential_start(b, node, 16, 64)?;
     if sets.is_empty() {
-        return Ok(None);
+        return Ok((None, false));
     }
 
     let byte_sets_raw: Vec<Vec<u8>> = sets
@@ -325,9 +328,12 @@ fn build_fwd_prefix_simd(
     // pure literal: every position is a single byte - use memchr + memcmp
     if byte_sets_raw.iter().all(|bs| bs.len() == 1) {
         let needle: Vec<u8> = byte_sets_raw.iter().map(|bs| bs[0]).collect();
-        return Ok(Some(crate::accel::FwdPrefixSearch::Literal(
-            crate::simd::FwdLiteralSearch::new(&needle),
-        )));
+        return Ok((
+            Some(crate::accel::FwdPrefixSearch::Literal(
+                crate::simd::FwdLiteralSearch::new(&needle),
+            )),
+            stripped,
+        ));
     }
 
     let mut freqs: Vec<(usize, u64)> = byte_sets_raw
@@ -343,12 +349,12 @@ fn build_fwd_prefix_simd(
         .filter(|&(_, f)| f > 0)
         .collect();
     if freqs.is_empty() {
-        return Ok(None);
+        return Ok((None, false));
     }
     freqs.sort_by_key(|&(_, f)| f);
 
     if byte_sets_raw[freqs[0].0].len() > 16 {
-        return Ok(None);
+        return Ok((None, false));
     }
 
     let freq_order: Vec<usize> = freqs.iter().map(|&(i, _)| i).collect();
@@ -358,17 +364,20 @@ fn build_fwd_prefix_simd(
         .map(|bytes| crate::accel::TSet::from_bytes(bytes))
         .collect();
 
-    Ok(Some(crate::accel::FwdPrefixSearch::Prefix(
-        crate::simd::FwdPrefixSearch::new(sets.len(), &freq_order, &byte_sets_raw, all_sets),
-    )))
+    Ok((
+        Some(crate::accel::FwdPrefixSearch::Prefix(
+            crate::simd::FwdPrefixSearch::new(sets.len(), &freq_order, &byte_sets_raw, all_sets),
+        )),
+        stripped,
+    ))
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn build_fwd_prefix_simd(
     _b: &mut RegexBuilder,
     _node: NodeId,
-) -> Result<Option<crate::accel::FwdPrefixSearch>, crate::Error> {
-    Ok(None)
+) -> Result<(Option<crate::accel::FwdPrefixSearch>, bool), crate::Error> {
+    Ok((None, false))
 }
 
 pub fn transition_term(b: &mut RegexBuilder, der: TRegexId, set: TSetId) -> NodeId {
@@ -385,6 +394,14 @@ pub fn transition_term(b: &mut RegexBuilder, der: TRegexId, set: TSetId) -> Node
             }
         }
     }
+}
+
+fn skip_is_profitable(bytes: &[u8]) -> bool {
+    let freq_sum: u32 = bytes
+        .iter()
+        .map(|&b| crate::simd::BYTE_FREQ[b as usize] as u32)
+        .sum();
+    freq_sum < 2000
 }
 
 pub struct LazyDFA {
@@ -421,7 +438,7 @@ impl LazyDFA {
         // state 0 = uncomputed, state 1 = dead
         let mut state_nodes: Vec<NodeId> = vec![NodeId::MISSING, NodeId::BOT];
         let mut node_to_state: HashMap<NodeId, u16> = HashMap::new();
-        node_to_state.insert(NodeId::BOT, DFA_DEAD as u16);
+        node_to_state.insert(NodeId::BOT, DFA_DEAD);
 
         let mut effects_id: Vec<u16> = vec![0u16; 2]; // slots 0,1
 
@@ -433,7 +450,7 @@ impl LazyDFA {
         effects_id.push(initial_eff_id.0 as u16);
 
         let der0 = b.der(initial, Nullability::BEGIN)?;
-        let mut begin_table = vec![DFA_DEAD as u16; minterms.len()];
+        let mut begin_table = vec![DFA_DEAD; minterms.len()];
         for (idx, mt) in minterms.iter().enumerate() {
             let t = transition_term(b, der0, *mt);
             let sid = register_state(&mut state_nodes, &mut node_to_state, &mut effects_id, b, t);
@@ -526,8 +543,8 @@ impl LazyDFA {
         state_id: u16,
         minterm_idx: u32,
     ) -> Result<u16, Error> {
-        if state_id == DFA_DEAD as u16 {
-            return Ok(DFA_DEAD as u16);
+        if state_id == DFA_DEAD {
+            return Ok(DFA_DEAD);
         }
 
         let node = self.state_nodes[state_id as usize];
@@ -561,7 +578,7 @@ impl LazyDFA {
         let mut visited = HashSet::new();
 
         for &sid in &self.begin_table {
-            if sid > DFA_DEAD as u16 {
+            if sid > DFA_DEAD {
                 todo.push_back(sid);
             }
         }
@@ -577,14 +594,14 @@ impl LazyDFA {
 
             let node = self.state_nodes[sid as usize];
             self.ensure_capacity(sid);
+            let sder = match b.der(node, Nullability::CENTER) {
+                Ok(d) => d,
+                Err(_) => {
+                    return false;
+                }
+            };
 
             for mt_idx in 0..self.minterms.len() {
-                let sder = match b.der(node, Nullability::CENTER) {
-                    Ok(d) => d,
-                    Err(_) => {
-                        return false;
-                    }
-                };
                 let mt = self.minterms[mt_idx];
                 let next_node = transition_term(b, sder, mt);
                 let next_sid = self.get_or_register(b, next_node);
@@ -603,8 +620,8 @@ impl LazyDFA {
         true
     }
 
-    fn precompile_state(&mut self, b: &mut RegexBuilder, state_id: u16) -> Result<(), Error> {
-        if state_id == DFA_DEAD as u16 {
+    pub(crate) fn precompile_state(&mut self, b: &mut RegexBuilder, state_id: u16) -> Result<(), Error> {
+        if state_id == DFA_DEAD {
             return Ok(());
         }
         let node = self.state_nodes[state_id as usize];
@@ -644,8 +661,8 @@ impl LazyDFA {
         if state >= self.skip_ids.len() || self.skip_ids[state] != 0 {
             return;
         }
-        // nullable states must record positions - can't skip
-        if state < self.effects_id.len() && self.effects_id[state] != 0 {
+        let is_nullable = state < self.effects_id.len() && self.effects_id[state] != 0;
+        if is_nullable && !self.can_skip() {
             return;
         }
         let base = state * num_mt;
@@ -667,9 +684,6 @@ impl LazyDFA {
         if non_self_mts.is_empty() {
             return;
         }
-        if non_self_mts.len() > 3 {
-            return;
-        }
         let mut bytes = Vec::new();
         for &mt in &non_self_mts {
             for (byte, &m) in self.minterms_lookup.iter().enumerate() {
@@ -678,20 +692,55 @@ impl LazyDFA {
                 }
             }
         }
-        if bytes.len() >= 1 && bytes.len() <= 3 {
-            self.skip_ids[state] = self.get_or_create_skip(bytes);
+        if bytes.len() <= 3 {
+            self.skip_ids[state] = self.get_or_create_skip_exact(bytes);
+            return;
+        }
+        if let Some(sid) = self.try_build_range_skip(&bytes) {
+            self.skip_ids[state] = sid;
         }
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn get_or_create_skip(&mut self, mut bytes: Vec<u8>) -> u8 {
+    fn try_build_range_skip(&mut self, bytes: &[u8]) -> Option<u8> {
+        let tset = crate::accel::TSet::from_bytes(bytes);
+        let ranges: Vec<(u8, u8)> = Solver::pp_collect_ranges(&tset).into_iter().collect();
+        if ranges.is_empty() || ranges.len() > 3 {
+            return None;
+        }
+        if !skip_is_profitable(bytes) {
+            return None;
+        }
+        Some(self.get_or_create_skip_range(ranges))
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn get_or_create_skip_exact(&mut self, mut bytes: Vec<u8>) -> u8 {
         bytes.sort();
         for (i, s) in self.skip_searchers.iter().enumerate() {
-            if s.bytes() == &bytes {
-                return (i + 1) as u8;
+            if let MintermSearchValue::Exact(ref e) = s {
+                if e.bytes() == &bytes {
+                    return (i + 1) as u8;
+                }
             }
         }
-        self.skip_searchers.push(MintermSearchValue::new(bytes));
+        self.skip_searchers
+            .push(MintermSearchValue::Exact(crate::simd::RevSearchBytes::new(bytes)));
+        self.skip_searchers.len() as u8
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn get_or_create_skip_range(&mut self, mut ranges: Vec<(u8, u8)>) -> u8 {
+        ranges.sort();
+        for (i, s) in self.skip_searchers.iter().enumerate() {
+            if let MintermSearchValue::Range(ref r) = s {
+                if r.ranges() == &ranges {
+                    return (i + 1) as u8;
+                }
+            }
+        }
+        self.skip_searchers
+            .push(MintermSearchValue::Range(crate::simd::RevSearchRanges::new(ranges)));
         self.skip_searchers.len() as u8
     }
 
@@ -710,7 +759,7 @@ impl LazyDFA {
 
         let mt = self.minterms_lookup[data[pos_begin] as usize];
         let mut curr = self.begin_table[mt as usize] as u32;
-        if curr <= DFA_DEAD {
+        if curr <= DFA_DEAD as u32 {
             return Ok(if has_empty { pos_begin } else { NO_MATCH });
         }
 
@@ -758,7 +807,7 @@ impl LazyDFA {
             let mt = self.minterms_lookup[data[new_pos] as usize] as u32;
             curr = self.lazy_transition(b, state as u16, mt)? as u32;
             pos = new_pos + 1;
-            if curr <= DFA_DEAD {
+            if curr <= DFA_DEAD as u32 {
                 break;
             }
 
@@ -817,7 +866,7 @@ impl LazyDFA {
 
             let mt = self.minterms_lookup[data[begin_pos] as usize];
             let mut curr = self.begin_table[mt as usize] as u32;
-            if curr <= DFA_DEAD {
+            if curr <= DFA_DEAD as u32 {
                 continue;
             }
 
@@ -860,7 +909,7 @@ impl LazyDFA {
                     let mt = self.minterms_lookup[data[new_pos] as usize] as u32;
                     curr = self.lazy_transition(b, state as u16, mt)? as u32;
                     pos = new_pos + 1;
-                    if curr <= DFA_DEAD {
+                    if curr <= DFA_DEAD as u32 {
                         break;
                     }
 
@@ -909,13 +958,13 @@ impl LazyDFA {
     ) -> Result<u32, Error> {
         let mt = self.minterms_lookup[data[pos] as usize];
         let mut state = self.begin_table[mt as usize];
-        if state <= DFA_DEAD as u16 {
+        if state <= DFA_DEAD {
             return Ok(0);
         }
         for i in 1..len {
             let mt = self.minterms_lookup[data[pos + i] as usize] as u32;
             state = self.lazy_transition(b, state, mt)?;
-            if state <= DFA_DEAD as u16 {
+            if state <= DFA_DEAD {
                 return Ok(0);
             }
         }
@@ -930,7 +979,7 @@ impl LazyDFA {
         pos_begin: usize,
         data: &[u8],
     ) -> Result<usize, Error> {
-        if state <= DFA_DEAD {
+        if state <= DFA_DEAD as u32 {
             return Ok(NO_MATCH);
         }
         let end = data.len();
@@ -980,7 +1029,7 @@ impl LazyDFA {
             let mt = self.minterms_lookup[data[new_pos] as usize] as u32;
             curr = self.lazy_transition(b, state_out as u16, mt)? as u32;
             pos = new_pos + 1;
-            if curr <= DFA_DEAD {
+            if curr <= DFA_DEAD as u32 {
                 break;
             }
 
@@ -1080,21 +1129,26 @@ impl LazyDFA {
         } else {
             let bytes = b.solver().collect_bytes(sets[0]);
             let ini = self.initial as usize;
-            if bytes.len() >= 1
-                && bytes.len() <= 3
-                && (ini >= self.effects_id.len() || self.effects_id[ini] == 0)
-            {
+            if ini < self.effects_id.len() && self.effects_id[ini] != 0 {
+                return Ok(());
+            }
+            if bytes.len() <= 3 {
                 if self.skip_ids.len() <= ini {
                     self.skip_ids.resize(ini + 1, 0u8);
                 }
-                self.skip_ids[ini] = self.get_or_create_skip(bytes);
+                self.skip_ids[ini] = self.get_or_create_skip_exact(bytes);
+            } else if let Some(sid) = self.try_build_range_skip(&bytes) {
+                if self.skip_ids.len() <= ini {
+                    self.skip_ids.resize(ini + 1, 0u8);
+                }
+                self.skip_ids[ini] = sid;
             }
         }
 
         Ok(())
     }
 
-    fn can_skip(&self) -> bool {
+    pub(crate) fn can_skip(&self) -> bool {
         !self.skip_searchers.is_empty()
     }
 
@@ -1113,7 +1167,7 @@ impl LazyDFA {
 
         let mt = self.minterms_lookup[data[start_pos] as usize];
         let mut curr = self.begin_table[mt as usize] as u32;
-        if curr <= DFA_DEAD {
+        if curr <= DFA_DEAD as u32 {
             return Ok(());
         }
 
@@ -1181,7 +1235,7 @@ impl LazyDFA {
             curr = self.center_table[delta] as u32;
             pos = new_pos;
 
-            if curr <= DFA_DEAD {
+            if curr <= DFA_DEAD as u32 {
                 break;
             }
 
@@ -1219,7 +1273,7 @@ impl LazyDFA {
         if match_pos == start_pos {
             let mt = self.minterms_lookup[data[start_pos] as usize];
             curr = self.begin_table[mt as usize] as u32;
-            if curr <= DFA_DEAD {
+            if curr <= DFA_DEAD as u32 {
                 return Ok(());
             }
             pos = match_pos;
@@ -1232,15 +1286,13 @@ impl LazyDFA {
         while pos > prefix_end {
             pos -= 1;
             let mt = self.minterms_lookup[data[pos] as usize] as u32;
-            let delta = self.dfa_delta(curr as u16, mt);
+            let mut delta = self.dfa_delta(curr as u16, mt);
             if delta >= self.center_table.len() || self.center_table[delta] == 0 {
                 self.precompile_state(b, curr as u16)?;
-                let delta = self.dfa_delta(curr as u16, mt);
-                curr = self.center_table[delta] as u32;
-            } else {
-                curr = self.center_table[delta] as u32;
+                delta = self.dfa_delta(curr as u16, mt);
             }
-            if curr <= DFA_DEAD {
+            curr = self.center_table[delta] as u32;
+            if curr <= DFA_DEAD as u32 {
                 return Ok(());
             }
         }
@@ -1256,7 +1308,6 @@ impl LazyDFA {
             return Ok(());
         }
 
-        // continue from pos to 0
         loop {
             let tables = ScanTables {
                 center_table: self.center_table.as_ptr(),
@@ -1295,7 +1346,7 @@ impl LazyDFA {
             curr = self.center_table[delta] as u32;
             pos = new_pos;
 
-            if curr <= DFA_DEAD {
+            if curr <= DFA_DEAD as u32 {
                 break;
             }
 
@@ -1318,7 +1369,7 @@ impl LazyDFA {
     ) -> Result<bool, Error> {
         let mt = self.minterms_lookup[data[start_pos] as usize];
         let mut curr = self.begin_table[mt as usize] as u32;
-        if curr <= DFA_DEAD {
+        if curr <= DFA_DEAD as u32 {
             return Ok(false);
         }
 
@@ -1353,7 +1404,7 @@ impl LazyDFA {
             let mt = self.minterms_lookup[data[new_pos] as usize] as u32;
             curr = self.lazy_transition(b, state as u16, mt)? as u32;
             pos = new_pos;
-            if curr <= DFA_DEAD {
+            if curr <= DFA_DEAD as u32 {
                 break;
             }
 
@@ -1362,7 +1413,7 @@ impl LazyDFA {
             }
         }
 
-        if pos == 0 && curr > DFA_DEAD {
+        if pos == 0 && curr > DFA_DEAD as u32 {
             if has_any_null(&self.effects_id, &self.effects, curr, Nullability::END) {
                 return Ok(true);
             }
@@ -1529,8 +1580,8 @@ fn collect_rev_noskip(
             if next == 0 {
                 return (curr, pos, true); // cache miss
             }
-            if next == DFA_DEAD as u16 {
-                return (DFA_DEAD, pos, false); // dead state
+            if next == DFA_DEAD {
+                return (DFA_DEAD as u32, pos, false); // dead state
             }
             curr = next as u32;
             prev_eid = *effects_id.add(curr as usize) as u32;
@@ -1563,8 +1614,8 @@ fn any_null_rev_noskip(t: &ScanTables, mut curr: u32, mut pos: usize) -> (u32, u
             if next == 0 {
                 return (curr, pos, false, true); // cache miss
             }
-            if next == DFA_DEAD as u16 {
-                return (DFA_DEAD, pos, false, false); // dead state
+            if next == DFA_DEAD {
+                return (DFA_DEAD as u32, pos, false, false); // dead state
             }
             curr = next as u32;
             let eid = *effects_id.add(curr as usize) as u32;
@@ -1613,6 +1664,27 @@ fn collect_rev_skip(
             if cfg!(feature = "debug-nulls") {
                 eprintln!("  [rev_skip] state={} skip {} -> {}", curr, old_pos, pos);
             }
+            // nullable self-loop: batch-emit nulls for all skipped positions
+            unsafe {
+                let eid = *effects_id.add(curr as usize) as u32;
+                if eid != 0 && pos < old_pos {
+                    if eid == 1 {
+                        for p in (pos..=old_pos).rev() {
+                            nulls.push(p);
+                        }
+                    } else {
+                        for p in (pos..=old_pos).rev() {
+                            collect_rev_complex(
+                                effects,
+                                eid,
+                                p,
+                                Nullability::CENTER,
+                                nulls,
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         let mut prev_eid: u32 = 0;
@@ -1632,8 +1704,8 @@ fn collect_rev_skip(
                 if next == 0 {
                     return (curr, pos, true); // cache miss
                 }
-                if next == DFA_DEAD as u16 {
-                    return (DFA_DEAD, pos, false); // dead state
+                if next == DFA_DEAD {
+                    return (DFA_DEAD as u32, pos, false); // dead state
                 }
                 curr = next as u32;
                 prev_eid = *effects_id.add(curr as usize) as u32;
@@ -1704,8 +1776,8 @@ fn scan_fwd_noskip(
             if next == 0 {
                 return (curr, pos, max_end, true); // cache miss
             }
-            if next == DFA_DEAD as u16 {
-                return (DFA_DEAD, pos, max_end, false); // dead state
+            if next == DFA_DEAD {
+                return (DFA_DEAD as u32, pos, max_end, false); // dead state
             }
             curr = next as u32;
             prev_eid = *effects_id.add(curr as usize) as u32;
