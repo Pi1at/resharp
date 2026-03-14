@@ -1,5 +1,40 @@
-//! resharp - a regex engine with all boolean operations and lookarounds,
+//! resharp - regex engine with intersection, complement, and lookarounds,
 //! powered by symbolic derivatives and lazy DFA construction.
+//!
+//! # quick start
+//!
+//! ```
+//! let re = resharp::Regex::new(r"\d{3}-\d{4}").unwrap();
+//! let matches = re.find_all(b"call 555-1234 or 555-5678").unwrap();
+//! assert_eq!(matches.len(), 2);
+//! ```
+//!
+//! # options
+//!
+//! use [`EngineOptions`] with [`Regex::with_options`] for non-default settings:
+//!
+//! ```
+//! use resharp::{Regex, EngineOptions};
+//!
+//! let re = Regex::with_options(
+//!     r"hello world",
+//!     EngineOptions::default()
+//!         .case_insensitive(true)
+//!         .dot_matches_new_line(true),
+//! ).unwrap();
+//! assert!(re.is_match(b"Hello World").unwrap());
+//! ```
+//!
+//! # escaping user input
+//!
+//! use [`escape`] to safely embed literal strings in patterns:
+//!
+//! ```
+//! let user_input = "file (1).txt";
+//! let pattern = format!(r"^{}$", resharp::escape(user_input));
+//! let re = resharp::Regex::new(&pattern).unwrap();
+//! assert!(re.is_match(b"file (1).txt").unwrap());
+//! ```
 
 #![deny(missing_docs)]
 
@@ -19,7 +54,14 @@ pub use resharp_algebra::solver::TSetId;
 pub use resharp_algebra::nulls::Nullability;
 pub use resharp_algebra::NodeId;
 pub use resharp_algebra::RegexBuilder;
+/// escape all resharp meta characters in `text`, returning a pattern
+/// that matches the literal string.
+///
+/// ```
+/// assert_eq!(resharp::escape("a+b"), r"a\+b");
+/// ```
 pub use resharp_parser::escape;
+/// like [`escape`] but appends to an existing buffer.
 pub use resharp_parser::escape_into;
 
 use std::sync::Mutex;
@@ -68,7 +110,19 @@ impl From<resharp_algebra::AlgebraError> for Error {
     }
 }
 
-/// combined pattern + engine options.
+/// configuration for pattern compilation and engine behavior.
+///
+/// all options have sensible defaults via [`Default`]. use the builder
+/// methods to override:
+///
+/// ```
+/// use resharp::EngineOptions;
+///
+/// let opts = EngineOptions::default()
+///     .unicode(false)           // ASCII-only \w, \d, \s
+///     .case_insensitive(true)   // global (?i)
+///     .dot_matches_new_line(true); // . matches \n
+/// ```
 pub struct EngineOptions {
     /// states to eagerly precompile (0 = fully lazy).
     pub dfa_threshold: usize,
@@ -76,13 +130,13 @@ pub struct EngineOptions {
     pub max_dfa_capacity: usize,
     /// max lookahead context distance (default: 800).
     pub lookahead_context_max: u32,
-    /// `\w`/`\d`/`\s` match full Unicode (true) or ASCII only (false).
+    /// `\w`/`\d`/`\s` match full Unicode (default: true) or ASCII only.
     pub unicode: bool,
-    /// global case-insensitive matching.
+    /// global case-insensitive matching (default: false).
     pub case_insensitive: bool,
-    /// `.` matches `\n` (behaves like `_`).
+    /// `.` matches `\n` (default: false). `_` always matches any byte.
     pub dot_matches_new_line: bool,
-    /// allow whitespace and `#` comments in the pattern.
+    /// allow whitespace and `#` comments in the pattern (default: false).
     pub ignore_whitespace: bool,
 }
 
@@ -132,7 +186,7 @@ struct RegexInner {
 
 /// compiled regex backed by a lazy DFA.
 ///
-/// uses a `Mutex` for mutable DFA state; clone for per-thread matching.
+/// uses a `Mutex` for mutable DFA state; clone for per-thread use.
 pub struct Regex {
     inner: Mutex<RegexInner>,
     fwd_prefix: Option<accel::FwdPrefixSearch>,
@@ -189,12 +243,26 @@ fn bdfa_inner<const PREFIX: u8>(
 }
 
 impl Regex {
-    /// compile with default options.
+    /// compile a pattern with default options.
+    ///
+    /// ```
+    /// let re = resharp::Regex::new(r"\b\w+\b").unwrap();
+    /// ```
     pub fn new(pattern: &str) -> Result<Regex, Error> {
         Self::with_options(pattern, EngineOptions::default())
     }
 
-    /// compile with custom options.
+    /// compile a pattern with custom [`EngineOptions`].
+    ///
+    /// ```
+    /// use resharp::{Regex, EngineOptions};
+    ///
+    /// let re = Regex::with_options(
+    ///     r"hello",
+    ///     EngineOptions::default().case_insensitive(true),
+    /// ).unwrap();
+    /// assert!(re.is_match(b"HELLO").unwrap());
+    /// ```
     pub fn with_options(pattern: &str, opts: EngineOptions) -> Result<Regex, Error> {
         let mut b = RegexBuilder::new();
         b.lookahead_context_max = opts.lookahead_context_max;
@@ -322,7 +390,14 @@ impl Regex {
         (fwd, rev)
     }
 
-    /// all non-overlapping matches, left-to-right.
+    /// all non-overlapping leftmost-first matches as `[start, end)` byte ranges.
+    ///
+    /// ```
+    /// let re = resharp::Regex::new(r"\d+").unwrap();
+    /// let m = re.find_all(b"abc 123 def 456").unwrap();
+    /// assert_eq!(m.len(), 2);
+    /// assert_eq!((m[0].start, m[0].end), (4, 7));
+    /// ```
     pub fn find_all(&self, input: &[u8]) -> Result<Vec<Match>, Error> {
         if input.is_empty() {
             return if self.empty_nullable {
@@ -804,7 +879,9 @@ impl Regex {
         Ok(inner.matches_buf.clone())
     }
 
-    /// longest match anchored at position 0, forward DFA only.
+    /// longest match anchored at position 0.
+    ///
+    /// returns `None` if the pattern does not match at position 0.
     pub fn find_anchored(&self, input: &[u8]) -> Result<Option<Match>, Error> {
         if input.is_empty() {
             return if self.empty_nullable {
@@ -826,6 +903,8 @@ impl Regex {
     }
 
     /// whether the pattern matches anywhere in the input.
+    ///
+    /// faster than `find_all` when you only need a yes/no answer.
     pub fn is_match(&self, input: &[u8]) -> Result<bool, Error> {
         if input.is_empty() {
             return Ok(self.empty_nullable);
