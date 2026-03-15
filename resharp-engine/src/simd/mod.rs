@@ -1222,6 +1222,17 @@ impl FwdRangeSearch {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+pub struct FwdRangeSearch {
+    _private: (),
+}
+
+#[cfg(target_arch = "aarch64")]
+impl FwdRangeSearch {
+    pub fn len(&self) -> usize { unreachable!() }
+    pub fn find_fwd(&self, _haystack: &[u8], _start: usize) -> Option<usize> { unreachable!() }
+}
+
 // ---- RevSearchRanges (AVX2) ----
 
 #[cfg(target_arch = "x86_64")]

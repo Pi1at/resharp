@@ -392,8 +392,14 @@ fn build_fwd_prefix_simd(
     let rarest_idx = freqs[0].0;
     let rarest_len = byte_sets_raw[rarest_idx].len();
 
+    #[cfg(target_arch = "x86_64")]
     if rarest_len > 16 {
         return try_build_fwd_range_prefix(&byte_sets_raw, rarest_idx, stripped);
+    }
+    // TODO: impl for neon
+    #[cfg(not(target_arch = "x86_64"))]
+    if rarest_len > 16 {
+        return Ok((None, false));
     }
 
     let freq_order: Vec<usize> = freqs.iter().map(|&(i, _)| i).collect();
@@ -420,7 +426,7 @@ fn build_fwd_prefix_simd(
 
 const MAX_RANGE_SETS: usize = 3;
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
 fn try_build_fwd_range_prefix(
     byte_sets_raw: &[Vec<u8>],
     anchor_pos: usize,
