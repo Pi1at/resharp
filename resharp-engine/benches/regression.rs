@@ -14,6 +14,11 @@ fn load_haystack_lines(name: &str, n: usize) -> String {
     full.lines().take(n).collect::<Vec<_>>().join("\n")
 }
 
+fn load_regex(name: &str) -> String {
+    let path = format!("{}/regexes/{}", data_dir(), name);
+    std::fs::read_to_string(&path).unwrap().trim().to_string()
+}
+
 fn load_dictionary_pattern(n: usize) -> String {
     let path = format!("{}/regexes/length-15.txt", data_dir());
     let contents = std::fs::read_to_string(&path).unwrap();
@@ -77,6 +82,15 @@ fn bench_resharp_regression(c: &mut Criterion) {
         let mut g = c.benchmark_group("resharp-only/lookaround");
         g.throughput(Throughput::Bytes(input.len() as u64));
         bench_resharp!(g, r"(?<=\s)[A-Z][a-z]+(?=\s)", input);
+        g.finish();
+    }
+    {
+        let haystack = load_haystack_lines("en-sampled.txt", 10_000);
+        let pattern = load_regex("date.txt");
+        let input = haystack.as_bytes();
+        let mut g = c.benchmark_group("resharp-only/date-monster");
+        g.throughput(Throughput::Bytes(input.len() as u64));
+        bench_resharp!(g, &pattern, input);
         g.finish();
     }
     {

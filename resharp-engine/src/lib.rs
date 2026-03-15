@@ -353,11 +353,12 @@ impl Regex {
 
         if fwd_prefix_stripped {
             fwd.compute_fwd_skip(&mut b);
-        } else if !opts.untrusted {
+        } else if !opts.untrusted && pattern_len <= 150 {
             fwd.compute_fwd_skip_inner(&mut b, 10);
         }
 
         let use_bounded = max_length.is_some()
+            && max_len <= 100
             && fixed_length.is_none()
             && !has_look
             && !b.contains_anchors(node)
@@ -611,7 +612,6 @@ impl Regex {
         matches: &mut Vec<Match>,
     ) -> Result<(), Error> {
         let mut pos = 0;
-        // first call populates lazy DFA states; rebuild skip info after
         let max_end = fwd.scan_fwd(b, pos, input)?;
         fwd.build_skip_all(b);
         if max_end != engine::NO_MATCH && max_end > pos {

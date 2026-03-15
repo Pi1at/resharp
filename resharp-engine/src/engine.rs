@@ -477,12 +477,27 @@ pub fn transition_term(b: &mut RegexBuilder, der: TRegexId, set: TSetId) -> Node
     }
 }
 
+const SKIP_FREQ_THRESHOLD: u32 = 2000;
+
 fn skip_is_profitable(bytes: &[u8]) -> bool {
+    if bytes.len() >= 256 {
+        return false;
+    }
     let freq_sum: u32 = bytes
         .iter()
         .map(|&b| crate::simd::BYTE_FREQ[b as usize] as u32)
         .sum();
-    freq_sum < 2000
+    if freq_sum < SKIP_FREQ_THRESHOLD {
+        return true;
+    }
+    if bytes.len() > 128 {
+        let complement_freq: u32 = (0u32..256)
+            .filter(|&b| !bytes.contains(&(b as u8)))
+            .map(|b| crate::simd::BYTE_FREQ[b as usize] as u32)
+            .sum();
+        return complement_freq < SKIP_FREQ_THRESHOLD;
+    }
+    false
 }
 
 pub struct LDFA {
@@ -808,6 +823,9 @@ impl LDFA {
         if !skip_is_profitable(bytes) {
             return None;
         }
+        if bytes.len() > 128 && (256 - bytes.len()) < 16 {
+            return None;
+        }
         Some(self.get_or_create_skip_range(ranges))
     }
 
@@ -1081,7 +1099,7 @@ impl LDFA {
                 }
             }
 
-            if !skip_rebuilt && nulls.len() > 64 {
+            if !skip_rebuilt && nulls.len() > 64 && self.state_nodes.len() < 256 {
                 skip_rebuilt = true;
                 self.build_skip_all(b);
                 use_skip = self.can_skip();
