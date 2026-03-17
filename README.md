@@ -40,7 +40,7 @@ _*a_*           any string that contains 'a'
 
 You combine all of these with `&` to get more complex patterns. RE# also supports lookarounds (`(?=...)`, `(?<=...)`, `(?!...)`, `(?<!...)`), compiled directly into the automaton with no backtracking.
 
-> RE# is not compatible with some `regex` crate features, eg. lazy quantifiers (`.*?`). See the full [syntax reference](docs/syntax.md) for details, and [features](docs/features.md) for untrusted mode and other advanced options.
+> RE# is not compatible with some `regex` crate features, eg. lazy quantifiers (`.*?`). See the full [syntax reference](docs/syntax.md) for details.
 
 ### When to use RE# over [`regex`](https://crates.io/crates/regex)
 
@@ -51,7 +51,7 @@ This is a from-scratch rust implementation operating on `&[u8]` / UTF-8 (the [do
 - leftmost longest matches rather than leftmost-greedy (PCRE)
 - `find_anchored` and `find_all` (no `find` or `captures`)
 
-Matching returns `Result<Vec<Match>, Error>` - capacity or lookahead overflow will fail outright rather than silently degrade. `EngineOptions` controls precompilation threshold, capacity, lookahead context, and [untrusted mode](docs/features.md):
+Matching returns `Result<Vec<Match>, Error>` - capacity or lookahead overflow will fail outright rather than silently degrade. `EngineOptions` controls precompilation threshold, capacity, and lookahead context:
 
 ```rust
 let opts = resharp::EngineOptions {
@@ -61,9 +61,6 @@ let opts = resharp::EngineOptions {
     ..Default::default()
 };
 let re = resharp::Regex::with_options(r"pattern", opts).unwrap();
-
-// for user-supplied patterns: O(n·S) forward scan, no quadratic blowup
-let re = resharp::Regex::with_options(r"pattern", EngineOptions::default().untrusted(true)).unwrap();
 ```
 
 ## Benchmarks

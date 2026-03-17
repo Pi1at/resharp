@@ -1527,13 +1527,13 @@ fn word_match_lengths_en_sampled() {
     );
 }
 
-fn run_file_untrusted(filename: &str) {
+fn run_file_hardened(filename: &str) {
     let tests = load_tests(filename);
     for tc in &tests {
         if tc.ignore || tc.expect_error || tc.anchored {
             continue;
         }
-        let opts = EngineOptions::default().untrusted(true);
+        let opts = EngineOptions::default().hardened(true);
         let re = match Regex::with_options(&tc.pattern, opts) {
             Ok(re) => re,
             Err(_) => continue,
@@ -1542,40 +1542,40 @@ fn run_file_untrusted(filename: &str) {
         let result: Vec<(usize, usize)> = matches.iter().map(|m| (m.start, m.end)).collect();
         assert_eq!(
             result, tc.matches,
-            "UNTRUSTED file={}, name={:?}, pattern={:?}, input={:?}",
+            "HARDENED file={}, name={:?}, pattern={:?}, input={:?}",
             filename, tc.name, tc.pattern, tc.input
         );
     }
 }
 
 #[test]
-fn untrusted_basic() {
-    run_file_untrusted("basic.toml");
+fn hardened_basic() {
+    run_file_hardened("basic.toml");
 }
 
 #[test]
-fn untrusted_anchors() {
-    run_file_untrusted("anchors.toml");
+fn hardened_anchors() {
+    run_file_hardened("anchors.toml");
 }
 
 #[test]
-fn untrusted_semantics() {
-    run_file_untrusted("semantics.toml");
+fn hardened_semantics() {
+    run_file_hardened("semantics.toml");
 }
 
 #[test]
-fn untrusted_date_pattern() {
-    run_file_untrusted("date_pattern.toml");
+fn hardened_date_pattern() {
+    run_file_hardened("date_pattern.toml");
 }
 
 #[test]
-fn untrusted_edge_cases() {
-    run_file_untrusted("edge_cases.toml");
+fn hardened_edge_cases() {
+    run_file_hardened("edge_cases.toml");
 }
 
 #[test]
-fn untrusted_rejects_lookaround() {
-    let s = || EngineOptions::default().untrusted(true);
+fn hardened_rejects_lookaround() {
+    let s = || EngineOptions::default().hardened(true);
     // lookaround patterns that survive algebra simplification are rejected
     assert!(Regex::with_options(r".*(?=aaa)", s()).is_err());
     assert!(Regex::with_options(r"(?<=__).*", s()).is_err());
@@ -1588,40 +1588,40 @@ fn untrusted_rejects_lookaround() {
 }
 
 #[test]
-fn untrusted_pathological() {
+fn hardened_pathological() {
     let pattern = r".*[^A-Z]|[A-Z]";
     let input = "A".repeat(1000);
     let re_normal = Regex::new(pattern).unwrap();
-    let re_untrusted = Regex::with_options(
+    let re_hardened = Regex::with_options(
         pattern,
-        EngineOptions::default().untrusted(true),
+        EngineOptions::default().hardened(true),
     ).unwrap();
     assert_eq!(
         re_normal.find_all(input.as_bytes()).unwrap(),
-        re_untrusted.find_all(input.as_bytes()).unwrap(),
+        re_hardened.find_all(input.as_bytes()).unwrap(),
         "pathological pattern mismatch"
     );
 }
 
-fn check_untrusted_vs_normal(pattern: &str, input: &[u8]) {
-    let opts = EngineOptions::default().untrusted(true);
+fn check_hardened_vs_normal(pattern: &str, input: &[u8]) {
+    let opts = EngineOptions::default().hardened(true);
     let re_s = match Regex::with_options(pattern, opts) {
         Ok(re) => re,
-        Err(_) => return, // skip patterns that fail in untrusted mode (e.g. lookaround)
+        Err(_) => return, // skip patterns that fail in hardened mode (e.g. lookaround)
     };
     let re_n = Regex::new(pattern).unwrap();
     let normal = re_n.find_all(input).unwrap();
-    let untrusted = re_s.find_all(input).unwrap();
+    let hardened = re_s.find_all(input).unwrap();
     assert_eq!(
-        normal, untrusted,
-        "untrusted vs normal mismatch: pattern={:?}, input={:?}",
+        normal, hardened,
+        "hardened vs normal mismatch: pattern={:?}, input={:?}",
         pattern,
         std::str::from_utf8(input).unwrap_or("<binary>")
     );
 }
 
 #[test]
-fn untrusted_cross_validate() {
+fn hardened_cross_validate() {
     let en = std::fs::read_to_string(
         format!("{}/../data/haystacks/en-sampled.txt", env!("CARGO_MANIFEST_DIR"))
     ).unwrap();
@@ -1640,17 +1640,17 @@ fn untrusted_cross_validate() {
         r"(Sherlock|Holmes|Watson)[a-z]{0,5}",
     ];
     for p in &patterns {
-        check_untrusted_vs_normal(p, input);
+        check_hardened_vs_normal(p, input);
     }
     // pathological: dense candidates with dotstar
     let aaaa = "A".repeat(500);
-    check_untrusted_vs_normal(r".*[^A-Z]|[A-Z]", aaaa.as_bytes());
-    check_untrusted_vs_normal(r"[A-Z]+", aaaa.as_bytes());
-    check_untrusted_vs_normal(r"A{1,3}", aaaa.as_bytes());
+    check_hardened_vs_normal(r".*[^A-Z]|[A-Z]", aaaa.as_bytes());
+    check_hardened_vs_normal(r"[A-Z]+", aaaa.as_bytes());
+    check_hardened_vs_normal(r"A{1,3}", aaaa.as_bytes());
 }
 
 #[test]
-fn untrusted_bounded_repeat_tail() {
+fn hardened_bounded_repeat_tail() {
     let s8 = "A".repeat(8);
     let s500 = "A".repeat(500);
     let s7 = "A".repeat(7);
@@ -1668,7 +1668,7 @@ fn untrusted_bounded_repeat_tail() {
             .map(|m| (m.start(), m.end()))
             .collect();
 
-        let re_u = Regex::with_options(pattern, EngineOptions::default().untrusted(true)).unwrap();
+        let re_u = Regex::with_options(pattern, EngineOptions::default().hardened(true)).unwrap();
         let got: Vec<(usize, usize)> = re_u
             .find_all(input.as_bytes())
             .unwrap()
@@ -1711,12 +1711,12 @@ fn range_prefix_correctness() {
     ];
     for p in &patterns {
         let re = Regex::new(p).unwrap();
-        let re_untrusted = Regex::with_options(p, EngineOptions::default().untrusted(true)).unwrap();
+        let re_hardened = Regex::with_options(p, EngineOptions::default().hardened(true)).unwrap();
         for input in &inputs {
             let normal = re.find_all(input).unwrap();
-            let untrusted = re_untrusted.find_all(input).unwrap();
+            let hardened = re_hardened.find_all(input).unwrap();
             assert_eq!(
-                normal, untrusted,
+                normal, hardened,
                 "range prefix mismatch: pattern={:?}, input={:?}",
                 p, std::str::from_utf8(input).unwrap_or("<binary>")
             );
@@ -1746,11 +1746,11 @@ fn range_prefix_random_haystack() {
         }).collect();
         for p in &patterns {
             let re = Regex::new(p).unwrap();
-            let re_s = Regex::with_options(p, EngineOptions::default().untrusted(true)).unwrap();
+            let re_s = Regex::with_options(p, EngineOptions::default().hardened(true)).unwrap();
             let normal = re.find_all(&input).unwrap();
-            let untrusted = re_s.find_all(&input).unwrap();
+            let hardened = re_s.find_all(&input).unwrap();
             assert_eq!(
-                normal, untrusted,
+                normal, hardened,
                 "random haystack mismatch: seed={}, pattern={:?}",
                 seed, p
             );

@@ -143,10 +143,10 @@ pub struct EngineOptions {
     pub dot_matches_new_line: bool,
     /// allow whitespace and `#` comments in the pattern (default: false).
     pub ignore_whitespace: bool,
-    /// use O(N·S) forward scan for untrusted input (default: false).
-    /// prevents quadratic blowup on adversarial inputs at the cost of
-    /// higher constant overhead.
-    pub untrusted: bool,
+    /// use O(N·S) hardened forward scan (default: false).
+    /// prevents quadratic blowup even when both pattern and input are
+    /// adversarial, at a constant overhead of ~5-20x on normal text.
+    pub hardened: bool,
 }
 
 impl Default for EngineOptions {
@@ -159,7 +159,7 @@ impl Default for EngineOptions {
             case_insensitive: false,
             dot_matches_new_line: false,
             ignore_whitespace: false,
-            untrusted: false,
+            hardened: false,
         }
     }
 }
@@ -173,8 +173,8 @@ impl EngineOptions {
     pub fn dot_matches_new_line(mut self, yes: bool) -> Self { self.dot_matches_new_line = yes; self }
     /// set ignore-whitespace (verbose) mode.
     pub fn ignore_whitespace(mut self, yes: bool) -> Self { self.ignore_whitespace = yes; self }
-    /// enable O(N·S) forward scan for untrusted input.
-    pub fn untrusted(mut self, yes: bool) -> Self { self.untrusted = yes; self }
+    /// enable O(N·S) hardened forward scan (~5-20x constant overhead).
+    pub fn hardened(mut self, yes: bool) -> Self { self.hardened = yes; self }
 }
 
 /// byte-offset range `[start, end)`.
@@ -207,7 +207,7 @@ pub struct Regex {
     max_length: Option<u32>,
     empty_nullable: bool,
     fwd_end_nullable: bool,
-    untrusted: bool,
+    hardened: bool,
 }
 
 #[inline(never)]
@@ -321,7 +321,7 @@ impl Regex {
             None
         };
         let has_look = b.contains_look(node);
-        if opts.untrusted && has_look {
+        if opts.hardened && has_look {
             return Err(Error::Algebra(
                 resharp_algebra::AlgebraError::UnsupportedPattern,
             ));
@@ -353,7 +353,7 @@ impl Regex {
 
         if fwd_prefix_stripped {
             fwd.compute_fwd_skip(&mut b);
-        } else if !opts.untrusted && pattern_len <= 150 {
+        } else if !opts.hardened && pattern_len <= 150 {
             fwd.compute_fwd_skip_inner(&mut b, 10);
         }
 
@@ -392,7 +392,7 @@ impl Regex {
             max_length,
             empty_nullable,
             fwd_end_nullable,
-            untrusted: opts.untrusted,
+            hardened: opts.hardened,
         })
     }
 
@@ -466,7 +466,7 @@ impl Regex {
                 Ok(vec![])
             };
         }
-        if self.untrusted {
+        if self.hardened {
             return self.find_all_dfa(input);
         }
         // 1. bounded + fwd prefix → BDFA with prefix skip
@@ -582,10 +582,10 @@ impl Regex {
                     last_end = start + fl;
                 }
             }
-        } else if self.untrusted {
+        } else if self.hardened {
             inner
                 .fwd
-                .scan_fwd_all_untrusted(&mut inner.b, &inner.nulls_buf, input, self.max_length, matches)?;
+                .scan_fwd_all_hardened(&mut inner.b, &inner.nulls_buf, input, self.max_length, matches)?;
         } else {
             inner
                 .fwd

@@ -1127,14 +1127,14 @@ impl LDFA {
         Ok(())
     }
 
-    /// O(N·S) forward scan for untrusted input.
+    /// O(N·S) hardened forward scan.
     ///
     /// tracks all candidate starts simultaneously (grouped by DFA state)
     /// instead of scanning forward from each candidate independently.
     /// avoids the O(N²) worst case of `scan_fwd_all` on patterns like
     /// `.*[^A-Z]|[A-Z]` with dense reverse-scan candidates.
     #[inline(never)]
-    pub fn scan_fwd_all_untrusted(
+    pub fn scan_fwd_all_hardened(
         &mut self,
         b: &mut RegexBuilder,
         nulls: &[usize],
@@ -1156,7 +1156,7 @@ impl LDFA {
 
         // nulls is descending; walk from end for ascending order
         if cfg!(feature = "debug-nulls") {
-            eprintln!("  [untrusted-fwd] nulls={:?} max_length={:?}", nulls, max_length);
+            eprintln!("  [hardened-fwd] nulls={:?} max_length={:?}", nulls, max_length);
         }
         let mut null_idx = nulls.len();
         let first_pos = nulls[nulls.len() - 1];
@@ -1259,7 +1259,7 @@ impl LDFA {
 
             // 3. dedup: for each DFA state keep at most 2 entries
             //    (earliest start, plus earliest-with-match if different)
-            untrusted_prune(&mut new_active, &mut dead);
+            hardened_prune(&mut new_active, &mut dead);
 
             if dead.len() > 50_000 {
                 return Err(Error::CapacityExceeded);
@@ -2111,7 +2111,7 @@ fn collect_rev_skip(
 /// 1. the entry with the smallest start (primary)
 /// 2. if primary has max_end == 0: also the earliest entry with max_end > 0 (backup)
 /// result is sorted by start ascending.
-fn untrusted_prune(active: &mut Vec<(u32, usize, usize)>, dead: &mut Vec<(usize, usize)>) {
+fn hardened_prune(active: &mut Vec<(u32, usize, usize)>, dead: &mut Vec<(usize, usize)>) {
     if active.len() <= 1 {
         return;
     }
