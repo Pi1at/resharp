@@ -32,6 +32,7 @@ let opts = resharp::EngineOptions {
     dfa_threshold: 0,              // states to eagerly precompile (0 = fully lazy)
     max_dfa_capacity: 65535,       // max DFA states (clamped to u16::MAX)
     lookahead_context_max: 800,    // max lookahead distance before AnchorLimit error
+    hardened: false,               // O(N·S) forward scan, slower but worst-case safe
     unicode: true,                 // \w/\d/\s match full Unicode (false = ASCII only)
     case_insensitive: false,       // global case-insensitive matching
     dot_matches_new_line: false,   // . matches \n (behaves like _)
